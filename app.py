@@ -930,118 +930,118 @@ def main():
             # セクション内の項目を2列で表示
             item_cols = st.columns(2)
             item_index = 0
+            
+            for item in items:
+                if not should_show_field(item, st.session_state.form_data):
+                    continue
                 
-                for item in items:
-                    if not should_show_field(item, st.session_state.form_data):
-                        continue
+                with item_cols[item_index % 2]:
+                    key = f"{item['大項目']}-{item['小項目']}"
+                    label = item["大項目"] if item["小項目"] == "-" else item["小項目"]
                     
-                    with item_cols[item_index % 2]:
-                        key = f"{item['大項目']}-{item['小項目']}"
-                        label = item["大項目"] if item["小項目"] == "-" else item["小項目"]
+                    if item["備考"]:
+                        label += f" ({item['備考']})"
+                    
+                    if item["取り得る値"] and item["取り得る値"] not in ["(任意)", "", "(選択)"]:
+                        # 通常の選択肢
+                        options = [""] + item["取り得る値"].split(",")
+                        current_value = st.session_state.form_data.get(key, "")
+                        selected = st.selectbox(label, options, 
+                                              index=options.index(current_value) if current_value in options else 0,
+                                              key=key)
+                        if selected:
+                            st.session_state.form_data[key] = selected
+                        elif key in st.session_state.form_data:
+                            del st.session_state.form_data[key]
+                    
+                    elif item["小項目"] == "追加カート":
+                        # 追加カート特別処理
+                        surface_count = calculate_surface_count(st.session_state.form_data.get("本体構成-ブロック"))
+                        options = get_cart_options(surface_count)
                         
-                        if item["備考"]:
-                            label += f" ({item['備考']})"
+                        current_value = st.session_state.form_data.get(key, "")
+                        selected = st.selectbox(label, options, 
+                                              index=options.index(current_value) if current_value in options else 0,
+                                              key=key)
                         
-                        if item["取り得る値"] and item["取り得る値"] not in ["(任意)", "", "(選択)"]:
-                            # 通常の選択肢
-                            options = [""] + item["取り得る値"].split(",")
-                            current_value = st.session_state.form_data.get(key, "")
-                            selected = st.selectbox(label, options, 
-                                                  index=options.index(current_value) if current_value in options else 0,
-                                                  key=key)
-                            if selected:
-                                st.session_state.form_data[key] = selected
-                            elif key in st.session_state.form_data:
+                        if selected == "自由入力":
+                            custom_value = st.number_input("カート数を入力", min_value=0, key=f"{key}_custom")
+                            if custom_value > 0:
+                                st.session_state.form_data[key] = f"{custom_value}台"
+                        elif selected:
+                            st.session_state.form_data[key] = selected
+                        elif key in st.session_state.form_data:
+                            del st.session_state.form_data[key]
+                    
+                    elif item["小項目"] == "追加トート":
+                        # 追加トート特別処理
+                        grid_count = calculate_grid_count(
+                            st.session_state.form_data.get("本体構成-段"),
+                            st.session_state.form_data.get("本体構成-列"),
+                            st.session_state.form_data.get("本体構成-ブロック")
+                        )
+                        options = get_tote_options(grid_count)
+                        
+                        current_value = st.session_state.form_data.get(key, "")
+                        selected = st.selectbox(label, options, 
+                                              index=options.index(current_value) if current_value in options else 0,
+                                              key=key)
+                        
+                        if selected == "自由入力":
+                            custom_value = st.number_input("トート数を入力", min_value=0, key=f"{key}_custom")
+                            if custom_value > 0:
+                                st.session_state.form_data[key] = f"{custom_value}個"
+                        elif selected:
+                            st.session_state.form_data[key] = selected
+                        elif key in st.session_state.form_data:
+                            del st.session_state.form_data[key]
+                    
+                    else:
+                        # 自由入力の場合
+                        input_type = "number" if any(unit in item["備考"] for unit in ["mm単位", "台単位", "個単位"]) else "text"
+                        current_value = st.session_state.form_data.get(key, "")
+                        
+                        if input_type == "number":
+                            # 空欄を許可する数値入力
+                            value = st.text_input(label, value=current_value, key=key, 
+                                                placeholder="数値を入力（空欄可）")
+                            if value and value.isdigit():
+                                st.session_state.form_data[key] = value
+                            elif not value and key in st.session_state.form_data:
                                 del st.session_state.form_data[key]
-                        
-                        elif item["小項目"] == "追加カート":
-                            # 追加カート特別処理
-                            surface_count = calculate_surface_count(st.session_state.form_data.get("本体構成-ブロック"))
-                            options = get_cart_options(surface_count)
-                            
-                            current_value = st.session_state.form_data.get(key, "")
-                            selected = st.selectbox(label, options, 
-                                                  index=options.index(current_value) if current_value in options else 0,
-                                                  key=key)
-                            
-                            if selected == "自由入力":
-                                custom_value = st.number_input("カート数を入力", min_value=0, key=f"{key}_custom")
-                                if custom_value > 0:
-                                    st.session_state.form_data[key] = f"{custom_value}台"
-                            elif selected:
-                                st.session_state.form_data[key] = selected
-                            elif key in st.session_state.form_data:
-                                del st.session_state.form_data[key]
-                        
-                        elif item["小項目"] == "追加トート":
-                            # 追加トート特別処理
-                            grid_count = calculate_grid_count(
-                                st.session_state.form_data.get("本体構成-段"),
-                                st.session_state.form_data.get("本体構成-列"),
-                                st.session_state.form_data.get("本体構成-ブロック")
-                            )
-                            options = get_tote_options(grid_count)
-                            
-                            current_value = st.session_state.form_data.get(key, "")
-                            selected = st.selectbox(label, options, 
-                                                  index=options.index(current_value) if current_value in options else 0,
-                                                  key=key)
-                            
-                            if selected == "自由入力":
-                                custom_value = st.number_input("トート数を入力", min_value=0, key=f"{key}_custom")
-                                if custom_value > 0:
-                                    st.session_state.form_data[key] = f"{custom_value}個"
-                            elif selected:
-                                st.session_state.form_data[key] = selected
-                            elif key in st.session_state.form_data:
-                                del st.session_state.form_data[key]
-                        
                         else:
-                            # 自由入力の場合
-                            input_type = "number" if any(unit in item["備考"] for unit in ["mm単位", "台単位", "個単位"]) else "text"
-                            current_value = st.session_state.form_data.get(key, "")
-                            
-                            if input_type == "number":
-                                # 空欄を許可する数値入力
-                                value = st.text_input(label, value=current_value, key=key, 
-                                                    placeholder="数値を入力（空欄可）")
-                                if value and value.isdigit():
-                                    st.session_state.form_data[key] = value
-                                elif not value and key in st.session_state.form_data:
-                                    del st.session_state.form_data[key]
-                            else:
-                                value = st.text_input(label, value=current_value, key=key)
-                                if value:
-                                    st.session_state.form_data[key] = value
-                                elif key in st.session_state.form_data:
-                                    del st.session_state.form_data[key]
-                    
-                    item_index += 1
+                            value = st.text_input(label, value=current_value, key=key)
+                            if value:
+                                st.session_state.form_data[key] = value
+                            elif key in st.session_state.form_data:
+                                del st.session_state.form_data[key]
                 
-                # 自動計算値の表示（本体構成セクションのみ）
-                if category == "本体構成":
-                    st.markdown("---")
-                    
-                    # 間口数計算
-                    rows = st.session_state.form_data.get("本体構成-段")
-                    cols_data = st.session_state.form_data.get("本体構成-列")
-                    blocks = st.session_state.form_data.get("本体構成-ブロック")
-                    
-                    grid_count = calculate_grid_count(rows, cols_data, blocks)
-                    surface_count = calculate_surface_count(blocks)
-                    
-                    calc_cols = st.columns(2)
-                    
-                    with calc_cols[0]:
-                        if grid_count > 0:
-                            st.info(f"🔢 **間口数**: {grid_count}口 (段×列×2×ブロック数)")
-                            st.session_state.form_data["間口数"] = grid_count
-                    
-                    with calc_cols[1]:
-                        if surface_count > 0:
-                            st.info(f"📐 **面数**: {surface_count}面 (ブロック数×2)")
-                            st.session_state.form_data["面数"] = surface_count
+                item_index += 1
+            
+            # 自動計算値の表示（本体構成セクションのみ）
+            if category == "本体構成":
+                st.markdown("---")
                 
+                # 間口数計算
+                rows = st.session_state.form_data.get("本体構成-段")
+                cols_data = st.session_state.form_data.get("本体構成-列")
+                blocks = st.session_state.form_data.get("本体構成-ブロック")
+                
+                grid_count = calculate_grid_count(rows, cols_data, blocks)
+                surface_count = calculate_surface_count(blocks)
+                
+                calc_cols = st.columns(2)
+                
+                with calc_cols[0]:
+                    if grid_count > 0:
+                        st.info(f"🔢 **間口数**: {grid_count}口 (段×列×2×ブロック数)")
+                        st.session_state.form_data["間口数"] = grid_count
+                
+                with calc_cols[1]:
+                    if surface_count > 0:
+                        st.info(f"📐 **面数**: {surface_count}面 (ブロック数×2)")
+                        st.session_state.form_data["面数"] = surface_count
+            
             # セクション間のスペース
             st.write("")
         
