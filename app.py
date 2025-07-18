@@ -1058,34 +1058,6 @@ def main():
                 
                 # 枠囲み終了
                 st.markdown("</div>", unsafe_allow_html=True)
-                                text-align: center;
-                            ">
-                            🔢 間口数: {grid_count}口<br/>
-                            <small>(段×列×2×ブロック数)</small>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            st.session_state.form_data["間口数"] = grid_count
-                    
-                    with calc_cols[1]:
-                        if surface_count > 0:
-                            st.markdown(f"""
-                            <div style="
-                                background-color: #e8f5e8;
-                                padding: 12px;
-                                border-radius: 8px;
-                                border: 2px solid #81c784;
-                                color: #2e7d32;
-                                font-weight: bold;
-                                text-align: center;
-                            ">
-                            📐 面数: {surface_count}面<br/>
-                            <small>(ブロック数×2)</small>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            st.session_state.form_data["面数"] = surface_count
-                
-                # セクション終了のスペース
-                st.write("")
         
         # 保存ボタン
         st.markdown("---")
