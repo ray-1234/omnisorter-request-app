@@ -392,12 +392,12 @@ def get_tote_options(grid_count):
     return options
 
 def save_to_notion(data):
-    """Notionデータベースに保存"""
+    """Notionデータベースに保存（簡易版）"""
     notion_api_key = st.secrets.get("NOTION_API_KEY")
     database_id = st.secrets.get("NOTION_DATABASE_ID")
     
     if not notion_api_key or not database_id:
-        st.error("Notion設定が不完全です。管理者に確認してください。")
+        st.error("Notion設定が不完全です。NOTION_API_KEYとNOTION_DATABASE_IDを設定してください。")
         return False
     
     url = "https://api.notion.com/v1/pages"
@@ -410,13 +410,13 @@ def save_to_notion(data):
     # プロパティを安全に構築
     properties = {}
     
-    # 必須フィールド
+    # 必須フィールド - 顧客名をタイトルに設定
     if data.get("顧客名"):
         properties["顧客名"] = {
-            "title": [{"text": {"content": str(data["顧客名"])[:100]}}]  # 100文字制限
+            "title": [{"text": {"content": str(data["顧客名"])[:100]}}]
         }
     
-    # オプションフィールド
+    # その他のフィールド
     if data.get("案件名"):
         properties["案件名"] = {
             "rich_text": [{"text": {"content": str(data["案件名"])[:2000]}}]
@@ -441,9 +441,9 @@ def save_to_notion(data):
         "select": {"name": "依頼中"}
     }
     
-    # 長いテキストフィールドは分割
+    # 長いテキストフィールドは分割して保存
     if data.get("見積依頼文"):
-        text = str(data["見積依頼文"])[:2000]  # 2000文字制限
+        text = str(data["見積依頼文"])[:2000]
         properties["見積依頼文"] = {
             "rich_text": [{"text": {"content": text}}]
         }
@@ -471,9 +471,7 @@ def save_to_notion(data):
     }
     
     try:
-        st.write("Debug: API呼び出し開始")
         response = requests.post(url, headers=headers, json=payload, timeout=30)
-        st.write(f"Debug: レスポンスコード: {response.status_code}")
         
         if response.status_code == 200:
             return True
@@ -594,11 +592,33 @@ def main():
     with st.sidebar:
         st.header("🔧 システム状態")
         if st.button("接続テスト"):
-            success, message = test_notion_connection()
-            if success:
-                st.success(f"✅ {message}")
-            else:
-                st.error(f"❌ {message}")
+            try:
+                success, message = test_notion_connection()
+                if success:
+                    st.success("接続テスト結果:")
+                    st.text(message)
+                else:
+                    st.error("接続テスト結果:")
+                    st.text(message)
+            except Exception as e:
+                st.error(f"テスト実行エラー: {str(e)}")
+        
+        # 設定確認
+        st.subheader("📋 設定確認")
+        api_key = st.secrets.get("NOTION_API_KEY", "未設定")
+        st.text(f"APIキー: {api_key[:10]}..." if api_key != "未設定" else "APIキー: 未設定")
+        
+        # データベースID確認
+        db_ids = {
+            "簡易版DB": st.secrets.get("NOTION_DATABASE_ID"),
+            "顧客マスタ": st.secrets.get("CUSTOMER_DB_ID"),
+            "案件マスタ": st.secrets.get("PROJECT_DB_ID"),
+            "依頼DB": st.secrets.get("OMNISORTER_REQUEST_DB_ID")
+        }
+        
+        for name, db_id in db_ids.items():
+            status = "✅ 設定済み" if db_id else "❌ 未設定"
+            st.text(f"{name}: {status}")
     
     # セッション状態の初期化
     if 'form_data' not in st.session_state:
@@ -610,112 +630,88 @@ def main():
     tab1, tab2, tab3 = st.tabs(["📝 入力フォーム", "💰 見積依頼文", "📐 図面依頼文"])
     
     with tab1:
-        # 顧客選択
-        customers = fetch_customers()
-        customer_options = ["--- 新規顧客 ---"] + [f"{c['name']}" for c in customers]
+        # マスタ連携の設定
+        use_master_sync = st.checkbox("既存マスタと連携する", value=False, 
+                                    help="顧客企業マスタと案件管理データベースと連携します")
         
-        selected_customer_index = st.selectbox(
-            "顧客選択（会社名）",
-            range(len(customer_options)),
-            format_func=lambda x: customer_options[x]
-        )
-        
-        selected_customer = None
-        if selected_customer_index == 0:
-            # 新規顧客
-            new_company_name = st.text_input("新規会社名", placeholder="株式会社○○")
-            if new_company_name:
-                if st.button("💾 新規顧客を作成"):
-                    customer_id = create_new_customer(new_company_name)
-                    if customer_id:
-                        st.success(f"顧客「{new_company_name}」を作成しました")
-                        st.cache_data.clear()  # キャッシュクリア
-                        st.rerun()
-        else:
-            selected_customer = customers[selected_customer_index - 1]
-            st.info(f"選択された顧客: {selected_customer['name']}")
-        
-        # 案件選択
-        if selected_customer:
-            projects = fetch_projects(selected_customer['id'])
-            project_options = ["--- 新規案件 ---"] + [f"{p['name']}" for p in projects]
+        if use_master_sync:
+            # マスタ連携モード
+            st.markdown('<div class="section-header"><h3>🏢 顧客・案件選択</h3></div>', unsafe_allow_html=True)
             
-            selected_project_index = st.selectbox(
-                "案件選択（案件名）",
-                range(len(project_options)),
-                format_func=lambda x: project_options[x]
+            # 顧客選択
+            customers = fetch_customers()
+            if not customers:
+                st.warning("顧客企業マスタからデータを取得できません。接続設定を確認してください。")
+                return
+                
+            customer_options = ["--- 新規顧客 ---"] + [f"{c['name']}" for c in customers]
+            
+            selected_customer_index = st.selectbox(
+                "顧客選択（会社名）",
+                range(len(customer_options)),
+                format_func=lambda x: customer_options[x]
             )
             
-            selected_project = None
-            if selected_project_index == 0:
-                # 新規案件
-                new_project_name = st.text_input("新規案件名", placeholder="○○倉庫OmniSorter導入")
-                if new_project_name:
-                    if st.button("💾 新規案件を作成"):
-                        project_id = create_new_project(new_project_name, selected_customer['id'])
-                        if project_id:
-                            st.success(f"案件「{new_project_name}」を作成しました")
-                            st.cache_data.clear()  # キャッシュクリア
+            selected_customer = None
+            if selected_customer_index == 0:
+                # 新規顧客
+                new_company_name = st.text_input("新規会社名", placeholder="株式会社○○")
+                if new_company_name:
+                    if st.button("💾 新規顧客を作成"):
+                        customer_id = create_new_customer(new_company_name)
+                        if customer_id:
+                            st.success(f"顧客「{new_company_name}」を作成しました")
+                            st.cache_data.clear()
                             st.rerun()
             else:
-                selected_project = projects[selected_project_index - 1]
-                st.info(f"選択された案件: {selected_project['name']}")
-        
-        # 依頼種別
-        request_type = st.selectbox("依頼種別", ["両方", "見積のみ", "図面のみ"])
-        notes = st.text_area("備考", placeholder="特記事項があれば記入してください")
-        
-        # マスタ連携使用時の保存処理
-        if 'use_master_sync' not in st.session_state:
-            st.session_state.use_master_sync = st.checkbox("既存マスタと連携する", value=False)
-        
-        if st.session_state.use_master_sync:
-            # マスタ連携版の保存
-            st.markdown("---")
-            if st.button("💾 マスタ連携で保存", type="primary"):
-                if not selected_project:
-                    st.error("案件を選択してください。")
+                selected_customer = customers[selected_customer_index - 1]
+                st.info(f"選択された顧客: {selected_customer['name']}")
+            
+            # 案件選択
+            selected_project = None
+            if selected_customer:
+                projects = fetch_projects(selected_customer['id'])
+                project_options = ["--- 新規案件 ---"] + [f"{p['name']}" for p in projects]
+                
+                selected_project_index = st.selectbox(
+                    "案件選択（案件名）",
+                    range(len(project_options)),
+                    format_func=lambda x: project_options[x]
+                )
+                
+                if selected_project_index == 0:
+                    # 新規案件
+                    new_project_name = st.text_input("新規案件名", placeholder="○○倉庫OmniSorter導入")
+                    if new_project_name:
+                        if st.button("💾 新規案件を作成"):
+                            project_id = create_new_project(new_project_name, selected_customer['id'])
+                            if project_id:
+                                st.success(f"案件「{new_project_name}」を作成しました")
+                                st.cache_data.clear()
+                                st.rerun()
                 else:
-                    # 依頼文生成
-                    quotation_text = generate_quotation_text(st.session_state.form_data)
-                    drawing_text = generate_drawing_text(st.session_state.form_data)
-                    
-                    # 保存用データ
-                    save_data = {
-                        "依頼種別": request_type,
-                        "OS機種": st.session_state.form_data.get("OS機種-", "未選択"),
-                        "見積依頼文": quotation_text,
-                        "図面依頼文": drawing_text,
-                        "仕様詳細": st.session_state.form_data,
-                        "備考": notes
-                    }
-                    
-                    if save_omnisorter_request(selected_project['id'], save_data):
-                        st.success("✅ マスタ連携でOmniSorter依頼が正常に保存されました！")
-                        st.session_state.form_data = {}
-                        st.rerun()
-                    else:
-                        st.error("❌ 保存に失敗しました。")
+                    selected_project = projects[selected_project_index - 1]
+                    st.info(f"選択された案件: {selected_project['name']}")
+            
+            # 依頼種別と備考
+            request_type = st.selectbox("依頼種別", ["両方", "見積のみ", "図面のみ"])
+            notes = st.text_area("備考", placeholder="特記事項があれば記入してください")
+            
         else:
-            # 簡易版（単一DB）の案件情報入力
+            # 簡易モード
             st.markdown('<div class="section-header"><h3>案件情報</h3></div>', unsafe_allow_html=True)
             
             col1, col2, col3 = st.columns(3)
             with col1:
-                customer_name = st.text_input("顧客名 *", value=st.session_state.project_info.get("顧客名", ""))
-                st.session_state.project_info["顧客名"] = customer_name
+                customer_name = st.text_input("顧客名 *")
             
             with col2:
-                project_name = st.text_input("案件名 *", value=st.session_state.project_info.get("案件名", ""))
-                st.session_state.project_info["案件名"] = project_name
+                project_name = st.text_input("案件名 *")
             
             with col3:
-                request_type = st.selectbox("依頼種別", ["両方", "見積のみ", "図面のみ"], 
-                                          index=["両方", "見積のみ", "図面のみ"].index(st.session_state.project_info.get("依頼種別", "両方")))
-                st.session_state.project_info["依頼種別"] = request_type
+                request_type = st.selectbox("依頼種別", ["両方", "見積のみ", "図面のみ"])
             
-            notes = st.text_area("備考", value=st.session_state.project_info.get("備考", ""))
-            st.session_state.project_info["備考"] = notes
+            notes = st.text_area("備考", placeholder="特記事項があれば記入してください")
         
         # 仕様入力
         st.markdown('<div class="section-header"><h3>仕様入力</h3></div>', unsafe_allow_html=True)
@@ -840,9 +836,37 @@ def main():
             
             col_index += 1
         
-        # 簡易版の保存ボタン
-        if not st.session_state.use_master_sync:
-            st.markdown("---")
+        # 保存ボタン
+        st.markdown("---")
+        
+        if use_master_sync:
+            # マスタ連携版の保存
+            if st.button("💾 マスタ連携で保存", type="primary"):
+                if not selected_project:
+                    st.error("案件を選択してください。")
+                else:
+                    # 依頼文生成
+                    quotation_text = generate_quotation_text(st.session_state.form_data)
+                    drawing_text = generate_drawing_text(st.session_state.form_data)
+                    
+                    # 保存用データ
+                    save_data = {
+                        "依頼種別": request_type,
+                        "OS機種": st.session_state.form_data.get("OS機種-", "未選択"),
+                        "見積依頼文": quotation_text,
+                        "図面依頼文": drawing_text,
+                        "仕様詳細": st.session_state.form_data,
+                        "備考": notes
+                    }
+                    
+                    if save_omnisorter_request(selected_project['id'], save_data):
+                        st.success("✅ マスタ連携でOmniSorter依頼が正常に保存されました！")
+                        st.session_state.form_data = {}
+                        st.rerun()
+                    else:
+                        st.error("❌ 保存に失敗しました。")
+        else:
+            # 簡易版の保存
             if st.button("💾 Notionに保存", type="primary"):
                 if not customer_name or not project_name:
                     st.error("顧客名と案件名は必須です。")
@@ -866,9 +890,7 @@ def main():
                     
                     if save_to_notion(notion_data):
                         st.markdown('<div class="success-message">✅ Notionに正常に保存されました！</div>', unsafe_allow_html=True)
-                        # フォームリセット
                         st.session_state.form_data = {}
-                        st.session_state.project_info = {}
                         st.rerun()
                     else:
                         st.markdown('<div class="error-message">❌ 保存に失敗しました。設定を確認してください。</div>', unsafe_allow_html=True)
