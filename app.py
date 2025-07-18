@@ -338,9 +338,16 @@ def create_new_project(project_name, customer_id):
 
 def save_omnisorter_request(project_id, data):
     """OmniSorter依頼をデータベースに保存"""
+    # まずマスタ連携用のDBを試す
     request_db_id = st.secrets.get("OMNISORTER_REQUEST_DB_ID")
+    
+    # マスタ連携用が未設定の場合は簡易版DBを使用
     if not request_db_id:
-        st.error("OmniSorter依頼データベースIDが設定されていません。")
+        request_db_id = st.secrets.get("NOTION_DATABASE_ID")
+        st.info("マスタ連携用DBが未設定のため、簡易版DBを使用します")
+    
+    if not request_db_id:
+        st.error("保存先データベースIDが設定されていません。")
         return False
     
     url = "https://api.notion.com/v1/pages"
@@ -350,37 +357,65 @@ def save_omnisorter_request(project_id, data):
         "Notion-Version": "2022-06-28"
     }
     
+    # 簡易版DBの場合は案件名も保存
+    properties = {}
+    
+    # 案件プロパティ（リレーション対応DBの場合）
+    if st.secrets.get("OMNISORTER_REQUEST_DB_ID"):
+        properties["案件"] = {
+            "relation": [{"id": project_id}]
+        }
+    else:
+        # 簡易版DBの場合は案件名を直接保存
+        # プロジェクトIDから案件名を取得
+        try:
+            project_info = get_project_info(project_id)
+            if project_info:
+                properties["案件名"] = {
+                    "rich_text": [{"text": {"content": project_info["name"]}}]
+                }
+                properties["顧客名"] = {
+                    "title": [{"text": {"content": project_info["customer_name"]}}]
+                }
+        except:
+            properties["案件名"] = {
+                "rich_text": [{"text": {"content": "マスタ連携案件"}}]
+            }
+            properties["顧客名"] = {
+                "title": [{"text": {"content": "マスタ連携顧客"}}]
+            }
+    
+    # 共通プロパティ
+    properties.update({
+        "依頼日": {
+            "date": {"start": datetime.now().strftime("%Y-%m-%d")}
+        },
+        "依頼種別": {
+            "select": {"name": data["依頼種別"]}
+        },
+        "依頼機種": {  # プロパティ名を正しく修正
+            "select": {"name": data.get("OS機種", "未選択")}
+        },
+        "ステータス": {
+            "select": {"name": "依頼中"}
+        },
+        "見積依頼文": {
+            "rich_text": [{"text": {"content": data["見積依頼文"][:2000]}}]
+        },
+        "図面依頼文": {
+            "rich_text": [{"text": {"content": data["図面依頼文"][:2000]}}]
+        },
+        "仕様詳細": {
+            "rich_text": [{"text": {"content": json.dumps(data["仕様詳細"], ensure_ascii=False, indent=2)[:2000]}}]
+        },
+        "備考": {
+            "rich_text": [{"text": {"content": data.get("備考", "")[:2000]}}]
+        }
+    })
+    
     payload = {
         "parent": {"database_id": request_db_id},
-        "properties": {
-            "案件": {
-                "relation": [{"id": project_id}]
-            },
-            "依頼日": {
-                "date": {"start": datetime.now().strftime("%Y-%m-%d")}
-            },
-            "依頼種別": {
-                "select": {"name": data["依頼種別"]}
-            },
-            "OS機種": {
-                "select": {"name": data.get("OS機種", "未選択")}
-            },
-            "ステータス": {
-                "select": {"name": "依頼中"}
-            },
-            "見積依頼文": {
-                "rich_text": [{"text": {"content": data["見積依頼文"]}}]
-            },
-            "図面依頼文": {
-                "rich_text": [{"text": {"content": data["図面依頼文"]}}]
-            },
-            "仕様詳細": {
-                "rich_text": [{"text": {"content": json.dumps(data["仕様詳細"], ensure_ascii=False, indent=2)}}]
-            },
-            "備考": {
-                "rich_text": [{"text": {"content": data.get("備考", "")}}]
-            }
-        }
+        "properties": properties
     }
     
     try:
@@ -394,6 +429,68 @@ def save_omnisorter_request(project_id, data):
     except Exception as e:
         st.error(f"OmniSorter依頼保存エラー: {str(e)}")
         return False
+
+def get_project_info(project_id):
+    """プロジェクトIDから案件情報を取得"""
+    try:
+        url = f"https://api.notion.com/v1/pages/{project_id}"
+        headers = {
+            "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
+            "Notion-Version": "2022-06-28"
+        }
+        
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            
+            # 案件名を取得
+            project_name = ""
+            for prop_name, prop_data in data["properties"].items():
+                if prop_data.get("type") == "title":
+                    if prop_data.get("title") and len(prop_data["title"]) > 0:
+                        project_name = prop_data["title"][0]["text"]["content"]
+                        break
+            
+            # 顧客名を取得（リレーションから）
+            customer_name = ""
+            customer_relation = data["properties"].get("顧客企業", {}).get("relation", [])
+            if customer_relation:
+                customer_id = customer_relation[0]["id"]
+                customer_info = get_customer_info(customer_id)
+                if customer_info:
+                    customer_name = customer_info["name"]
+            
+            return {
+                "name": project_name,
+                "customer_name": customer_name
+            }
+    except Exception as e:
+        st.error(f"案件情報取得エラー: {str(e)}")
+    
+    return None
+
+def get_customer_info(customer_id):
+    """顧客IDから顧客情報を取得"""
+    try:
+        url = f"https://api.notion.com/v1/pages/{customer_id}"
+        headers = {
+            "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
+            "Notion-Version": "2022-06-28"
+        }
+        
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            
+            company_name = ""
+            if data["properties"].get("会社名", {}).get("title"):
+                company_name = data["properties"]["会社名"]["title"][0]["text"]["content"]
+            
+            return {"name": company_name}
+    except Exception as e:
+        st.error(f"顧客情報取得エラー: {str(e)}")
+    
+    return None
 
 def save_to_notion(data):
     """Notionデータベースに保存（簡易版）"""
@@ -436,7 +533,7 @@ def save_to_notion(data):
         }
     
     if data.get("OS機種"):
-        properties["OS機種"] = {
+        properties["依頼機種"] = {  # プロパティ名を正しく修正
             "select": {"name": str(data["OS機種"])}
         }
     
@@ -770,108 +867,144 @@ def main():
             notes = st.text_area("備考", placeholder="特記事項があれば記入してください")
         
         # 仕様入力
-        st.markdown('<div class="section-header"><h3>仕様入力</h3></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header"><h3>⚙️ 仕様入力</h3></div>', unsafe_allow_html=True)
         
-        # カテゴリごとに表示
+        # カテゴリごとに表示（1列表示、枠囲み）
         categories = {}
         for item in FORM_ITEMS:
             if item["大項目"] not in categories:
                 categories[item["大項目"]] = []
             categories[item["大項目"]].append(item)
         
-        cols = st.columns(2)
-        col_index = 0
-        
+        # 各カテゴリを枠囲みで表示
         for category, items in categories.items():
-            with cols[col_index % 2]:
-                st.subheader(category)
+            # セクション見出しのアイコン
+            icons = {
+                "OS機種": "🤖",
+                "本体構成": "🏗️", 
+                "設置容器": "📦",
+                "仕分け商品": "📋",
+                "オプション": "⚙️"
+            }
+            
+            icon = icons.get(category, "📌")
+            
+            with st.container():
+                st.markdown(f"""
+                <div style="
+                    border: 2px solid #e2e8f0;
+                    border-radius: 10px;
+                    padding: 20px;
+                    margin: 15px 0;
+                    background-color: #f8fafc;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                ">
+                <h3 style="
+                    color: #2d3748;
+                    margin-top: 0;
+                    margin-bottom: 15px;
+                    border-bottom: 2px solid #cbd5e0;
+                    padding-bottom: 8px;
+                    font-size: 1.3em;
+                ">{icon} {category}</h3>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # セクション内の項目を2列で表示
+                item_cols = st.columns(2)
+                item_index = 0
                 
                 for item in items:
                     if not should_show_field(item, st.session_state.form_data):
                         continue
                     
-                    key = f"{item['大項目']}-{item['小項目']}"
-                    label = item["大項目"] if item["小項目"] == "-" else item["小項目"]
-                    
-                    if item["備考"]:
-                        label += f" ({item['備考']})"
-                    
-                    if item["取り得る値"] and item["取り得る値"] not in ["(任意)", "", "(選択)"]:
-                        # 通常の選択肢
-                        options = [""] + item["取り得る値"].split(",")
-                        current_value = st.session_state.form_data.get(key, "")
-                        selected = st.selectbox(label, options, 
-                                              index=options.index(current_value) if current_value in options else 0,
-                                              key=key)
-                        if selected:
-                            st.session_state.form_data[key] = selected
-                        elif key in st.session_state.form_data:
-                            del st.session_state.form_data[key]
-                    
-                    elif item["小項目"] == "追加カート":
-                        # 追加カート特別処理
-                        surface_count = calculate_surface_count(st.session_state.form_data.get("本体構成-ブロック"))
-                        options = get_cart_options(surface_count)
+                    with item_cols[item_index % 2]:
+                        key = f"{item['大項目']}-{item['小項目']}"
+                        label = item["大項目"] if item["小項目"] == "-" else item["小項目"]
                         
-                        current_value = st.session_state.form_data.get(key, "")
-                        selected = st.selectbox(label, options, 
-                                              index=options.index(current_value) if current_value in options else 0,
-                                              key=key)
+                        if item["備考"]:
+                            label += f" ({item['備考']})"
                         
-                        if selected == "自由入力":
-                            custom_value = st.number_input("カート数を入力", min_value=0, key=f"{key}_custom")
-                            if custom_value > 0:
-                                st.session_state.form_data[key] = f"{custom_value}台"
-                        elif selected:
-                            st.session_state.form_data[key] = selected
-                        elif key in st.session_state.form_data:
-                            del st.session_state.form_data[key]
-                    
-                    elif item["小項目"] == "追加トート":
-                        # 追加トート特別処理
-                        grid_count = calculate_grid_count(
-                            st.session_state.form_data.get("本体構成-段"),
-                            st.session_state.form_data.get("本体構成-列"),
-                            st.session_state.form_data.get("本体構成-ブロック")
-                        )
-                        options = get_tote_options(grid_count)
-                        
-                        current_value = st.session_state.form_data.get(key, "")
-                        selected = st.selectbox(label, options, 
-                                              index=options.index(current_value) if current_value in options else 0,
-                                              key=key)
-                        
-                        if selected == "自由入力":
-                            custom_value = st.number_input("トート数を入力", min_value=0, key=f"{key}_custom")
-                            if custom_value > 0:
-                                st.session_state.form_data[key] = f"{custom_value}個"
-                        elif selected:
-                            st.session_state.form_data[key] = selected
-                        elif key in st.session_state.form_data:
-                            del st.session_state.form_data[key]
-                    
-                    else:
-                        # 自由入力の場合
-                        input_type = "number" if any(unit in item["備考"] for unit in ["mm単位", "台単位", "個単位"]) else "text"
-                        current_value = st.session_state.form_data.get(key, "")
-                        
-                        if input_type == "number":
-                            # 空欄を許可する数値入力
-                            value = st.text_input(label, value=current_value, key=key, 
-                                                placeholder="数値を入力（空欄可）")
-                            if value and value.isdigit():
-                                st.session_state.form_data[key] = value
-                            elif not value and key in st.session_state.form_data:
-                                del st.session_state.form_data[key]
-                        else:
-                            value = st.text_input(label, value=current_value, key=key)
-                            if value:
-                                st.session_state.form_data[key] = value
+                        if item["取り得る値"] and item["取り得る値"] not in ["(任意)", "", "(選択)"]:
+                            # 通常の選択肢
+                            options = [""] + item["取り得る値"].split(",")
+                            current_value = st.session_state.form_data.get(key, "")
+                            selected = st.selectbox(label, options, 
+                                                  index=options.index(current_value) if current_value in options else 0,
+                                                  key=key)
+                            if selected:
+                                st.session_state.form_data[key] = selected
                             elif key in st.session_state.form_data:
                                 del st.session_state.form_data[key]
+                        
+                        elif item["小項目"] == "追加カート":
+                            # 追加カート特別処理
+                            surface_count = calculate_surface_count(st.session_state.form_data.get("本体構成-ブロック"))
+                            options = get_cart_options(surface_count)
+                            
+                            current_value = st.session_state.form_data.get(key, "")
+                            selected = st.selectbox(label, options, 
+                                                  index=options.index(current_value) if current_value in options else 0,
+                                                  key=key)
+                            
+                            if selected == "自由入力":
+                                custom_value = st.number_input("カート数を入力", min_value=0, key=f"{key}_custom")
+                                if custom_value > 0:
+                                    st.session_state.form_data[key] = f"{custom_value}台"
+                            elif selected:
+                                st.session_state.form_data[key] = selected
+                            elif key in st.session_state.form_data:
+                                del st.session_state.form_data[key]
+                        
+                        elif item["小項目"] == "追加トート":
+                            # 追加トート特別処理
+                            grid_count = calculate_grid_count(
+                                st.session_state.form_data.get("本体構成-段"),
+                                st.session_state.form_data.get("本体構成-列"),
+                                st.session_state.form_data.get("本体構成-ブロック")
+                            )
+                            options = get_tote_options(grid_count)
+                            
+                            current_value = st.session_state.form_data.get(key, "")
+                            selected = st.selectbox(label, options, 
+                                                  index=options.index(current_value) if current_value in options else 0,
+                                                  key=key)
+                            
+                            if selected == "自由入力":
+                                custom_value = st.number_input("トート数を入力", min_value=0, key=f"{key}_custom")
+                                if custom_value > 0:
+                                    st.session_state.form_data[key] = f"{custom_value}個"
+                            elif selected:
+                                st.session_state.form_data[key] = selected
+                            elif key in st.session_state.form_data:
+                                del st.session_state.form_data[key]
+                        
+                        else:
+                            # 自由入力の場合
+                            input_type = "number" if any(unit in item["備考"] for unit in ["mm単位", "台単位", "個単位"]) else "text"
+                            current_value = st.session_state.form_data.get(key, "")
+                            
+                            if input_type == "number":
+                                # 空欄を許可する数値入力
+                                value = st.text_input(label, value=current_value, key=key, 
+                                                    placeholder="数値を入力（空欄可）")
+                                if value and value.isdigit():
+                                    st.session_state.form_data[key] = value
+                                elif not value and key in st.session_state.form_data:
+                                    del st.session_state.form_data[key]
+                            else:
+                                value = st.text_input(label, value=current_value, key=key)
+                                if value:
+                                    st.session_state.form_data[key] = value
+                                elif key in st.session_state.form_data:
+                                    del st.session_state.form_data[key]
+                    
+                    item_index += 1
                 
-                # 自動計算値の表示
+                # 自動計算値の表示（本体構成セクションのみ）
                 if category == "本体構成":
+                    st.markdown("---")
+                    
                     # 間口数計算
                     rows = st.session_state.form_data.get("本体構成-段")
                     cols_data = st.session_state.form_data.get("本体構成-列")
@@ -880,17 +1013,46 @@ def main():
                     grid_count = calculate_grid_count(rows, cols_data, blocks)
                     surface_count = calculate_surface_count(blocks)
                     
-                    if grid_count > 0:
-                        st.markdown(f'<div class="calculated-value">🔢 間口数: {grid_count}口（自動計算）</div>', 
-                                  unsafe_allow_html=True)
-                        st.session_state.form_data["間口数"] = grid_count
+                    calc_cols = st.columns(2)
                     
-                    if surface_count > 0:
-                        st.markdown(f'<div class="calculated-value">📐 面数: {surface_count}面（自動計算）</div>', 
-                                  unsafe_allow_html=True)
-                        st.session_state.form_data["面数"] = surface_count
-            
-            col_index += 1
+                    with calc_cols[0]:
+                        if grid_count > 0:
+                            st.markdown(f"""
+                            <div style="
+                                background-color: #e0f2fe;
+                                padding: 12px;
+                                border-radius: 8px;
+                                border: 2px solid #81d4fa;
+                                color: #01579b;
+                                font-weight: bold;
+                                text-align: center;
+                            ">
+                            🔢 間口数: {grid_count}口<br/>
+                            <small>(段×列×2×ブロック数)</small>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            st.session_state.form_data["間口数"] = grid_count
+                    
+                    with calc_cols[1]:
+                        if surface_count > 0:
+                            st.markdown(f"""
+                            <div style="
+                                background-color: #e8f5e8;
+                                padding: 12px;
+                                border-radius: 8px;
+                                border: 2px solid #81c784;
+                                color: #2e7d32;
+                                font-weight: bold;
+                                text-align: center;
+                            ">
+                            📐 面数: {surface_count}面<br/>
+                            <small>(ブロック数×2)</small>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            st.session_state.form_data["面数"] = surface_count
+                
+                # セクション終了のスペース
+                st.write("")
         
         # 保存ボタン
         st.markdown("---")
