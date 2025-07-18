@@ -154,7 +154,7 @@ def fetch_projects(customer_id=None):
         "Notion-Version": "2022-06-28"
     }
     
-    # 顧客でフィルター
+    # 顧客でフィルター（customer_idが指定された場合のみ）
     payload = {}
     if customer_id:
         payload = {
@@ -168,21 +168,48 @@ def fetch_projects(customer_id=None):
     
     try:
         response = requests.post(url, headers=headers, json=payload)
+        
+        # デバッグ情報を追加
+        st.write(f"Debug - 案件取得: ステータス {response.status_code}")
+        if customer_id:
+            st.write(f"Debug - 顧客ID: {customer_id}")
+        
         if response.status_code == 200:
             data = response.json()
+            st.write(f"Debug - 取得件数: {len(data.get('results', []))}")
+            
             projects = []
             for page in data.get("results", []):
+                # デバッグ: プロパティ構造を確認
+                st.write(f"Debug - ページプロパティ: {list(page['properties'].keys())}")
+                
                 project_name = ""
+                # 案件名の取得を試行
                 if page["properties"].get("案件名", {}).get("title"):
                     project_name = page["properties"]["案件名"]["title"][0]["text"]["content"]
+                elif page["properties"].get("Name", {}).get("title"):
+                    # もしタイトルが"Name"の場合
+                    project_name = page["properties"]["Name"]["title"][0]["text"]["content"]
+                else:
+                    # 全プロパティをチェック
+                    for prop_name, prop_data in page["properties"].items():
+                        if prop_data.get("type") == "title" and prop_data.get("title"):
+                            project_name = prop_data["title"][0]["text"]["content"]
+                            st.write(f"Debug - タイトル発見: {prop_name} = {project_name}")
+                            break
                 
-                projects.append({
-                    "id": page["id"],
-                    "name": project_name
-                })
+                if project_name:
+                    projects.append({
+                        "id": page["id"],
+                        "name": project_name
+                    })
+                else:
+                    st.write(f"Debug - 案件名が見つかりません: {page['id']}")
+            
             return projects
         else:
             st.error(f"案件情報の取得に失敗: {response.status_code}")
+            st.error(f"レスポンス: {response.text}")
             return []
     except Exception as e:
         st.error(f"案件情報取得エラー: {str(e)}")
