@@ -609,16 +609,35 @@ def main():
         st.text(f"APIキー: {api_key[:10]}..." if api_key != "未設定" else "APIキー: 未設定")
         
         # データベースID確認
-        db_ids = {
-            "簡易版DB": st.secrets.get("NOTION_DATABASE_ID"),
-            "顧客マスタ": st.secrets.get("CUSTOMER_DB_ID"),
-            "案件マスタ": st.secrets.get("PROJECT_DB_ID"),
-            "依頼DB": st.secrets.get("OMNISORTER_REQUEST_DB_ID")
-        }
+        # 簡易版DB（必須）
+        simple_db_id = st.secrets.get("NOTION_DATABASE_ID")
+        simple_status = "✅ 設定済み" if simple_db_id else "❌ 未設定"
+        st.text(f"OmniSorter依頼DB: {simple_status}")
         
-        for name, db_id in db_ids.items():
-            status = "✅ 設定済み" if db_id else "❌ 未設定"
-            st.text(f"{name}: {status}")
+        # マスタ連携用（オプション）
+        st.text("--- マスタ連携用（オプション） ---")
+        
+        customer_db_id = st.secrets.get("CUSTOMER_DB_ID")
+        customer_status = "✅ 設定済み" if customer_db_id else "⚠️ 未設定"
+        st.text(f"顧客企業マスタ: {customer_status}")
+        
+        project_db_id = st.secrets.get("PROJECT_DB_ID")
+        project_status = "✅ 設定済み" if project_db_id else "⚠️ 未設定"
+        st.text(f"案件管理DB: {project_status}")
+        
+        # マスタ連携専用のOmniSorter依頼DB（リレーション用）
+        master_request_db_id = st.secrets.get("OMNISORTER_REQUEST_DB_ID")
+        master_request_status = "✅ 設定済み" if master_request_db_id else "⚠️ 未設定"
+        st.text(f"マスタ連携用依頼DB: {master_request_status}")
+        
+        if simple_db_id:
+            st.success("✅ 簡易モードが利用可能です")
+        
+        master_ready = customer_db_id and project_db_id and master_request_db_id
+        if master_ready:
+            st.success("✅ マスタ連携モードが利用可能です")
+        else:
+            st.info("ℹ️ マスタ連携には3つのDBが必要です")
     
     # セッション状態の初期化
     if 'form_data' not in st.session_state:
@@ -818,10 +837,10 @@ def main():
                 if category == "本体構成":
                     # 間口数計算
                     rows = st.session_state.form_data.get("本体構成-段")
-                    cols = st.session_state.form_data.get("本体構成-列")
+                    cols_data = st.session_state.form_data.get("本体構成-列")
                     blocks = st.session_state.form_data.get("本体構成-ブロック")
                     
-                    grid_count = calculate_grid_count(rows, cols, blocks)
+                    grid_count = calculate_grid_count(rows, cols_data, blocks)
                     surface_count = calculate_surface_count(blocks)
                     
                     if grid_count > 0:
@@ -842,7 +861,7 @@ def main():
         if use_master_sync:
             # マスタ連携版の保存
             if st.button("💾 マスタ連携で保存", type="primary"):
-                if not selected_project:
+                if 'selected_project' not in locals() or not selected_project:
                     st.error("案件を選択してください。")
                 else:
                     # 依頼文生成
@@ -868,7 +887,7 @@ def main():
         else:
             # 簡易版の保存
             if st.button("💾 Notionに保存", type="primary"):
-                if not customer_name or not project_name:
+                if 'customer_name' not in locals() or 'project_name' not in locals() or not customer_name or not project_name:
                     st.error("顧客名と案件名は必須です。")
                 else:
                     # 依頼文生成
