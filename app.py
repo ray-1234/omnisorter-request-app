@@ -341,10 +341,9 @@ def save_omnisorter_request(project_id, data):
     # まずマスタ連携用のDBを試す
     request_db_id = st.secrets.get("OMNISORTER_REQUEST_DB_ID")
     
-    # マスタ連携用が未設定の場合は簡易版DBを使用
+    # マスタ連携用が未設定の場合は簡易版DBを使用（メッセージ非表示）
     if not request_db_id:
         request_db_id = st.secrets.get("NOTION_DATABASE_ID")
-        st.info("マスタ連携用DBが未設定のため、簡易版DBを使用します")
     
     if not request_db_id:
         st.error("保存先データベースIDが設定されていません。")
@@ -385,6 +384,9 @@ def save_omnisorter_request(project_id, data):
                 "title": [{"text": {"content": "マスタ連携顧客"}}]
             }
     
+    # 仕様詳細を見やすい形式で整形
+    spec_text = format_specifications_for_notion(data["仕様詳細"])
+    
     # 共通プロパティ
     properties.update({
         "依頼日": {
@@ -393,7 +395,7 @@ def save_omnisorter_request(project_id, data):
         "依頼種別": {
             "select": {"name": data["依頼種別"]}
         },
-        "依頼機種": {  # プロパティ名を正しく修正
+        "依頼機種": {
             "select": {"name": data.get("OS機種", "未選択")}
         },
         "ステータス": {
@@ -406,7 +408,7 @@ def save_omnisorter_request(project_id, data):
             "rich_text": [{"text": {"content": data["図面依頼文"][:2000]}}]
         },
         "仕様詳細": {
-            "rich_text": [{"text": {"content": json.dumps(data["仕様詳細"], ensure_ascii=False, indent=2)[:2000]}}]
+            "rich_text": [{"text": {"content": spec_text[:2000]}}]
         },
         "備考": {
             "rich_text": [{"text": {"content": data.get("備考", "")[:2000]}}]
@@ -429,6 +431,40 @@ def save_omnisorter_request(project_id, data):
     except Exception as e:
         st.error(f"OmniSorter依頼保存エラー: {str(e)}")
         return False
+
+def format_specifications_for_notion(specs_dict):
+    """仕様詳細をNotion用に見やすく整形"""
+    if not specs_dict:
+        return "仕様情報なし"
+    
+    formatted_text = "【仕様詳細】\n\n"
+    
+    # カテゴリごとに整理
+    categories = {
+        "OS機種": [],
+        "本体構成": [],
+        "設置容器": [],
+        "仕分け商品": [],
+        "オプション": [],
+        "自動計算値": []
+    }
+    
+    for key, value in specs_dict.items():
+        if "-" in key:
+            category, item = key.split("-", 1)
+            if category in categories:
+                categories[category].append(f"  • {item}: {value}")
+        elif key in ["間口数", "面数"]:
+            categories["自動計算値"].append(f"  • {key}: {value}")
+    
+    # カテゴリごとに出力
+    for category, items in categories.items():
+        if items:
+            formatted_text += f"{category}:\n"
+            formatted_text += "\n".join(items)
+            formatted_text += "\n\n"
+    
+    return formatted_text
 
 def get_project_info(project_id):
     """プロジェクトIDから案件情報を取得"""
@@ -555,9 +591,9 @@ def save_to_notion(data):
         }
     
     if data.get("仕様詳細"):
-        specs_text = json.dumps(data["仕様詳細"], ensure_ascii=False, indent=2)[:2000]
+        spec_text = format_specifications_for_notion(data["仕様詳細"])
         properties["仕様詳細"] = {
-            "rich_text": [{"text": {"content": specs_text}}]
+            "rich_text": [{"text": {"content": spec_text[:2000]}}]
         }
     
     if data.get("備考"):
@@ -730,8 +766,8 @@ def should_show_field(item, form_data):
 def main():
     st.markdown('<h1 class="main-header">📦 OmniSorter 見積・図面依頼システム</h1>', unsafe_allow_html=True)
     
-    # Notion接続テスト
-    with st.sidebar:
+    # Notion接続テスト（サイドバーを初期状態で閉じる）
+    with st.sidebar.expander("🔧 システム診断", expanded=False):
         st.header("🔧 システム状態")
         if st.button("接続テスト"):
             try:
@@ -747,8 +783,7 @@ def main():
         
         # 設定確認
         st.subheader("📋 設定確認")
-        api_key = st.secrets.get("NOTION_API_KEY", "未設定")
-        st.text(f"APIキー: {api_key[:10]}..." if api_key != "未設定" else "APIキー: 未設定")
+        # APIキー表示を削除
         
         # データベースID確認
         simple_db_id = st.secrets.get("NOTION_DATABASE_ID")
@@ -847,7 +882,7 @@ def main():
                     st.info(f"選択された案件: {selected_project['name']}")
             
             # 依頼種別と備考
-            request_type = st.selectbox("依頼種別", ["両方", "見積のみ", "図面のみ"])
+            request_type = st.selectbox("依頼種別", ["見積/図面", "見積のみ", "図面のみ"])
             notes = st.text_area("備考", placeholder="特記事項があれば記入してください")
             
         else:
@@ -862,7 +897,7 @@ def main():
                 project_name = st.text_input("案件名 *")
             
             with col3:
-                request_type = st.selectbox("依頼種別", ["両方", "見積のみ", "図面のみ"])
+                request_type = st.selectbox("依頼種別", ["見積/図面", "見積のみ", "図面のみ"])
             
             notes = st.text_area("備考", placeholder="特記事項があれば記入してください")
         
@@ -876,7 +911,7 @@ def main():
                 categories[item["大項目"]] = []
             categories[item["大項目"]].append(item)
         
-        # 各カテゴリを枠囲みで表示
+        # 各カテゴリをシンプルに表示
         for category, items in categories.items():
             # セクション見出しのアイコン
             icons = {
@@ -889,35 +924,12 @@ def main():
             
             icon = icons.get(category, "📌")
             
-            # 枠囲みをst.containerで実装
-            with st.container():
-                # カスタムCSS枠囲み
-                st.markdown(f"""
-                <div style="
-                    border: 2px solid #e2e8f0;
-                    border-radius: 10px;
-                    padding: 20px;
-                    margin: 15px 0;
-                    background-color: #f8fafc;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                ">
-                """, unsafe_allow_html=True)
-                
-                # セクションタイトル
-                st.markdown(f"""
-                <h3 style="
-                    color: #2d3748;
-                    margin-top: 0;
-                    margin-bottom: 15px;
-                    border-bottom: 2px solid #cbd5e0;
-                    padding-bottom: 8px;
-                    font-size: 1.3em;
-                ">{icon} {category}</h3>
-                """, unsafe_allow_html=True)
-                
-                # セクション内の項目を2列で表示
-                item_cols = st.columns(2)
-                item_index = 0
+            # シンプルなセクション表示
+            st.subheader(f"{icon} {category}")
+            
+            # セクション内の項目を2列で表示
+            item_cols = st.columns(2)
+            item_index = 0
                 
                 for item in items:
                     if not should_show_field(item, st.session_state.form_data):
@@ -1022,42 +1034,16 @@ def main():
                     
                     with calc_cols[0]:
                         if grid_count > 0:
-                            st.markdown(f"""
-                            <div style="
-                                background-color: #e0f2fe;
-                                padding: 12px;
-                                border-radius: 8px;
-                                border: 2px solid #81d4fa;
-                                color: #01579b;
-                                font-weight: bold;
-                                text-align: center;
-                            ">
-                            🔢 間口数: {grid_count}口<br/>
-                            <small>(段×列×2×ブロック数)</small>
-                            </div>
-                            """, unsafe_allow_html=True)
+                            st.info(f"🔢 **間口数**: {grid_count}口 (段×列×2×ブロック数)")
                             st.session_state.form_data["間口数"] = grid_count
                     
                     with calc_cols[1]:
                         if surface_count > 0:
-                            st.markdown(f"""
-                            <div style="
-                                background-color: #e8f5e8;
-                                padding: 12px;
-                                border-radius: 8px;
-                                border: 2px solid #81c784;
-                                color: #2e7d32;
-                                font-weight: bold;
-                                text-align: center;
-                            ">
-                            📐 面数: {surface_count}面<br/>
-                            <small>(ブロック数×2)</small>
-                            </div>
-                            """, unsafe_allow_html=True)
+                            st.info(f"📐 **面数**: {surface_count}面 (ブロック数×2)")
                             st.session_state.form_data["面数"] = surface_count
                 
-                # 枠囲み終了
-                st.markdown("</div>", unsafe_allow_html=True)
+            # セクション間のスペース
+            st.write("")
         
         # 保存ボタン
         st.markdown("---")
@@ -1145,7 +1131,7 @@ def main():
             st.success("上記テキストをコピーしてご利用ください。")
 
     # デバッグ情報（開発用）
-    with st.expander("🔍 デバッグ情報（開発用）"):
+    with st.expander("🔍 デバッグ情報（開発用）", expanded=False):
         st.write("フォームデータ:", st.session_state.form_data)
 
 if __name__ == "__main__":
