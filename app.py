@@ -889,7 +889,9 @@ def main():
             
             icon = icons.get(category, "📌")
             
+            # 枠囲みをst.containerで実装
             with st.container():
+                # カスタムCSS枠囲み
                 st.markdown(f"""
                 <div style="
                     border: 2px solid #e2e8f0;
@@ -899,6 +901,10 @@ def main():
                     background-color: #f8fafc;
                     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 ">
+                """, unsafe_allow_html=True)
+                
+                # セクションタイトル
+                st.markdown(f"""
                 <h3 style="
                     color: #2d3748;
                     margin-top: 0;
@@ -907,7 +913,6 @@ def main():
                     padding-bottom: 8px;
                     font-size: 1.3em;
                 ">{icon} {category}</h3>
-                </div>
                 """, unsafe_allow_html=True)
                 
                 # セクション内の項目を2列で表示
@@ -1051,6 +1056,34 @@ def main():
                             """, unsafe_allow_html=True)
                             st.session_state.form_data["面数"] = surface_count
                 
+                # 枠囲み終了
+                st.markdown("</div>", unsafe_allow_html=True)
+                                text-align: center;
+                            ">
+                            🔢 間口数: {grid_count}口<br/>
+                            <small>(段×列×2×ブロック数)</small>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            st.session_state.form_data["間口数"] = grid_count
+                    
+                    with calc_cols[1]:
+                        if surface_count > 0:
+                            st.markdown(f"""
+                            <div style="
+                                background-color: #e8f5e8;
+                                padding: 12px;
+                                border-radius: 8px;
+                                border: 2px solid #81c784;
+                                color: #2e7d32;
+                                font-weight: bold;
+                                text-align: center;
+                            ">
+                            📐 面数: {surface_count}面<br/>
+                            <small>(ブロック数×2)</small>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            st.session_state.form_data["面数"] = surface_count
+                
                 # セクション終了のスペース
                 st.write("")
         
@@ -1063,55 +1096,63 @@ def main():
                 if 'selected_project' not in locals() or not selected_project:
                     st.error("案件を選択してください。")
                 else:
-                    # 依頼文生成
-                    quotation_text = generate_quotation_text(st.session_state.form_data)
-                    drawing_text = generate_drawing_text(st.session_state.form_data)
-                    
-                    # 保存用データ
-                    save_data = {
-                        "依頼種別": request_type,
-                        "OS機種": st.session_state.form_data.get("OS機種-", "未選択"),
-                        "見積依頼文": quotation_text,
-                        "図面依頼文": drawing_text,
-                        "仕様詳細": st.session_state.form_data,
-                        "備考": notes
-                    }
-                    
-                    if save_omnisorter_request(selected_project['id'], save_data):
-                        st.success("✅ マスタ連携でOmniSorter依頼が正常に保存されました！")
-                        st.session_state.form_data = {}
-                        st.rerun()
-                    else:
-                        st.error("❌ 保存に失敗しました。")
+                    # 重複実行防止のため一時的にボタンを無効化
+                    with st.spinner("保存中..."):
+                        # 依頼文生成
+                        quotation_text = generate_quotation_text(st.session_state.form_data)
+                        drawing_text = generate_drawing_text(st.session_state.form_data)
+                        
+                        # 保存用データ
+                        save_data = {
+                            "依頼種別": request_type,
+                            "OS機種": st.session_state.form_data.get("OS機種-", "未選択"),
+                            "見積依頼文": quotation_text,
+                            "図面依頼文": drawing_text,
+                            "仕様詳細": st.session_state.form_data,
+                            "備考": notes
+                        }
+                        
+                        if save_omnisorter_request(selected_project['id'], save_data):
+                            st.success("✅ マスタ連携でOmniSorter依頼が正常に保存されました！")
+                            # フォームリセットは手動で行う
+                            if st.button("🔄 フォームをリセット"):
+                                st.session_state.form_data = {}
+                                st.rerun()
+                        else:
+                            st.error("❌ 保存に失敗しました。")
         else:
             # 簡易版の保存
             if st.button("💾 Notionに保存", type="primary"):
                 if 'customer_name' not in locals() or 'project_name' not in locals() or not customer_name or not project_name:
                     st.error("顧客名と案件名は必須です。")
                 else:
-                    # 依頼文生成
-                    quotation_text = generate_quotation_text(st.session_state.form_data)
-                    drawing_text = generate_drawing_text(st.session_state.form_data)
-                    
-                    # Notion保存用データ
-                    notion_data = {
-                        "顧客名": customer_name,
-                        "案件名": project_name,
-                        "依頼日": datetime.now().strftime("%Y-%m-%d"),
-                        "依頼種別": request_type,
-                        "OS機種": st.session_state.form_data.get("OS機種-", "未選択"),
-                        "見積依頼文": quotation_text,
-                        "図面依頼文": drawing_text,
-                        "仕様詳細": st.session_state.form_data,
-                        "備考": notes
-                    }
-                    
-                    if save_to_notion(notion_data):
-                        st.markdown('<div class="success-message">✅ Notionに正常に保存されました！</div>', unsafe_allow_html=True)
-                        st.session_state.form_data = {}
-                        st.rerun()
-                    else:
-                        st.markdown('<div class="error-message">❌ 保存に失敗しました。設定を確認してください。</div>', unsafe_allow_html=True)
+                    # 重複実行防止のため一時的にボタンを無効化
+                    with st.spinner("保存中..."):
+                        # 依頼文生成
+                        quotation_text = generate_quotation_text(st.session_state.form_data)
+                        drawing_text = generate_drawing_text(st.session_state.form_data)
+                        
+                        # Notion保存用データ
+                        notion_data = {
+                            "顧客名": customer_name,
+                            "案件名": project_name,
+                            "依頼日": datetime.now().strftime("%Y-%m-%d"),
+                            "依頼種別": request_type,
+                            "OS機種": st.session_state.form_data.get("OS機種-", "未選択"),
+                            "見積依頼文": quotation_text,
+                            "図面依頼文": drawing_text,
+                            "仕様詳細": st.session_state.form_data,
+                            "備考": notes
+                        }
+                        
+                        if save_to_notion(notion_data):
+                            st.markdown('<div class="success-message">✅ Notionに正常に保存されました！</div>', unsafe_allow_html=True)
+                            # フォームリセットは手動で行う
+                            if st.button("🔄 フォームをリセット"):
+                                st.session_state.form_data = {}
+                                st.rerun()
+                        else:
+                            st.markdown('<div class="error-message">❌ 保存に失敗しました。設定を確認してください。</div>', unsafe_allow_html=True)
     
     with tab2:
         st.subheader("見積依頼文")
