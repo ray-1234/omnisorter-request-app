@@ -193,6 +193,429 @@ def fetch_customers():
     }
     
     try:
+        response = requests.post(url, headers=headers, json={})
+        if response.status_code == 200:
+            data = response.json()
+            customers = []
+            for page in data.get("results", []):
+                company_name = ""
+                if page["properties"].get("会社名", {}).get("title"):
+                    company_name = page["properties"]["会社名"]["title"][0]["text"]["content"]
+                
+                customers.append({
+                    "id": page["id"],
+                    "name": company_name
+                })
+            return customers
+        else:
+            st.error(f"顧客情報の取得に失敗: {response.status_code}")
+            return []
+    except Exception as e:
+        st.error(f"顧客情報取得エラー: {str(e)}")
+        return []
+
+@st.cache_data(ttl=300)
+def fetch_projects(customer_id=None):
+    """案件管理データベースから案件一覧を取得"""
+    project_db_id = st.secrets.get("PROJECT_DB_ID")
+    if not project_db_id:
+        return []
+    
+    url = f"https://api.notion.com/v1/databases/{project_db_id}/query"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    # 顧客でフィルター（正しいプロパティ名「顧客企業」を使用）
+    payload = {}
+    if customer_id:
+        payload = {
+            "filter": {
+                "property": "顧客企業",
+                "relation": {
+                    "contains": customer_id
+                }
+            }
+        }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            projects = []
+            for page in data.get("results", []):
+                project_name = ""
+                
+                # タイトルプロパティを自動検出
+                for prop_name, prop_data in page["properties"].items():
+                    if prop_data.get("type") == "title":
+                        if prop_data.get("title") and len(prop_data["title"]) > 0:
+                            project_name = prop_data["title"][0]["text"]["content"]
+                            break
+                
+                if project_name:
+                    projects.append({
+                        "id": page["id"],
+                        "name": project_name
+                    })
+            
+            return projects
+        else:
+            st.error(f"案件情報の取得に失敗: {response.status_code}")
+            st.error(f"レスポンス: {response.text}")
+            return []
+    except Exception as e:
+        st.error(f"案件情報取得エラー: {str(e)}")
+        return []
+
+def create_new_customer(company_name):
+    """新規顧客を顧客企業マスタに作成"""
+    customer_db_id = st.secrets.get("CUSTOMER_DB_ID")
+    if not customer_db_id:
+        return None, "顧客企業マスタDBが設定されていません"
+    
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    payload = {
+        "parent": {"database_id": customer_db_id},
+        "properties": {
+            "会社名": {
+                "title": [{"text": {"content": company_name}}]
+            }
+        }
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        if response.status_code == 200:
+            data = response.json()
+            return data["id"], None
+        else:
+            return None, f"顧客作成に失敗: {response.status_code} - {response.text}"
+    except Exception as e:
+        return None, f"顧客作成エラー: {str(e)}"
+
+def create_new_project(project_name, customer_id):
+    """新規案件を案件管理データベースに作成"""
+    project_db_id = st.secrets.get("PROJECT_DB_ID")
+    if not project_db_id:
+        return None, "案件管理DBが設定されていません"
+    
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    payload = {
+        "parent": {"database_id": project_db_id},
+        "properties": {
+            "案件名": {
+                "title": [{"text": {"content": project_name}}]
+            },
+            "顧客企業": {
+                "relation": [{"id": customer_id}]
+            },
+            "開始日": {
+                "date": {"start": datetime.now().strftime("%Y-%m-%d")}
+            },
+            "ステータス": {
+                "select": {"name": "進行中"}
+            }
+        }
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        if response.status_code == 200:
+            data = response.json()
+            return data["id"], None
+        else:
+            return None, f"案件作成に失敗: {response.status_code} - {response.text}"
+    except Exception as e:
+        return None, f"案件作成エラー: {str(e)}"
+
+def save_omnisorter_request(project_id, data):
+    """OmniSorter依頼をデータベースに保存"""
+    # まずマスタ連携用のDBを試す
+    request_db_id = st.secrets.get("OMNISORTER_REQUEST_DB_ID")
+    
+    # マスタ連携用が未設定の場合は簡易版DBを使用（メッセージ非表示）
+    if not request_db_id:
+        request_db_id = st.secrets.get("NOTION_DATABASE_ID")
+    
+    if not request_db_id:
+        st.error("保存先データベースIDが設定されていません。")
+        return False
+    
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    # 簡易版DBの場合は案件名も保存
+    properties = {}
+    
+    # 案件プロパティ（リレーション対応DBの場合）
+    if st.secrets.get("OMNISORTER_REQUEST_DB_ID"):
+        properties["案件"] = {
+            "relation": [{"id": project_id}]
+        }
+    else:
+        # 簡易版DBの場合は案件名を直接保存
+        # プロジェクトIDから案件名を取得
+        try:
+            project_info = get_project_info(project_id)
+            if project_info:
+                properties["案件名"] = {
+                    "rich_text": [{"text": {"content": project_info["name"]}}]
+                }
+                properties["顧客名"] = {
+                    "title": [{"text": {"content": project_info["customer_name"]}}]
+                }
+        except:
+            properties["案件名"] = {
+                "rich_text": [{"text": {"content": "マスタ連携案件"}}]
+            }
+            properties["顧客名"] = {
+                "title": [{"text": {"content": "マスタ連携顧客"}}]
+            }
+    
+    # 仕様詳細を見やすい形式で整形
+    spec_text = format_specifications_for_notion(data["仕様詳細"])
+    
+    # 共通プロパティ
+    properties.update({
+        "依頼日": {
+            "date": {"start": datetime.now().strftime("%Y-%m-%d")}
+        },
+        "依頼種別": {
+            "select": {"name": data["依頼種別"]}
+        },
+        "依頼機種": {
+            "select": {"name": data.get("OS機種", "未選択")}
+        },
+        "ステータス": {
+            "select": {"name": "依頼中"}
+        },
+        "見積依頼文": {
+            "rich_text": [{"text": {"content": data["見積依頼文"][:2000]}}]
+        },
+        "図面依頼文": {
+            "rich_text": [{"text": {"content": data["図面依頼文"][:2000]}}]
+        },
+        "仕様詳細": {
+            "rich_text": [{"text": {"content": spec_text[:2000]}}]
+        },
+        "備考": {
+            "rich_text": [{"text": {"content": data.get("備考", "")[:2000]}}]
+        }
+    })
+    
+    payload = {
+        "parent": {"database_id": request_db_id},
+        "properties": properties
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        if response.status_code == 200:
+            return True
+        else:
+            st.error(f"OmniSorter依頼保存に失敗: {response.status_code}")
+            st.error(f"レスポンス: {response.text}")
+            return False
+    except Exception as e:
+        st.error(f"OmniSorter依頼保存エラー: {str(e)}")
+        return False
+
+def format_specifications_for_notion(specs_dict):
+    """仕様詳細をNotion用に見やすく整形"""
+    if not specs_dict:
+        return "仕様情報なし"
+    
+    formatted_text = "【仕様詳細】\n\n"
+    
+    # カテゴリごとに整理
+    categories = {
+        "OS機種": [],
+        "本体構成": [],
+        "設置容器": [],
+        "仕分け商品": [],
+        "オプション": [],
+        "自動計算値": []
+    }
+    
+    for key, value in specs_dict.items():
+        if "-" in key:
+            category, item = key.split("-", 1)
+            if category in categories:
+                categories[category].append(f"  • {item}: {value}")
+        elif key in ["間口数", "面数"]:
+            categories["自動計算値"].append(f"  • {key}: {value}")
+    
+    # カテゴリごとに出力
+    for category, items in categories.items():
+        if items:
+            formatted_text += f"{category}:\n"
+            formatted_text += "\n".join(items)
+            formatted_text += "\n\n"
+    
+    return formatted_text
+
+def get_project_info(project_id):
+    """プロジェクトIDから案件情報を取得"""
+    try:
+        url = f"https://api.notion.com/v1/pages/{project_id}"
+        headers = {
+            "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
+            "Notion-Version": "2022-06-28"
+        }
+        
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            
+            # 案件名を取得
+            project_name = ""
+            for prop_name, prop_data in data["properties"].items():
+                if prop_data.get("type") == "title":
+                    if prop_data.get("title") and len(prop_data["title"]) > 0:
+                        project_name = prop_data["title"][0]["text"]["content"]
+                        break
+            
+            # 顧客名を取得（リレーションから）
+            customer_name = ""
+            customer_relation = data["properties"].get("顧客企業", {}).get("relation", [])
+            if customer_relation:
+                customer_id = customer_relation[0]["id"]
+                customer_info = get_customer_info(customer_id)
+                if customer_info:
+                    customer_name = customer_info["name"]
+            
+            return {
+                "name": project_name,
+                "customer_name": customer_name
+            }
+    except Exception as e:
+        st.error(f"案件情報取得エラー: {str(e)}")
+    
+    return None
+
+def get_customer_info(customer_id):
+    """顧客IDから顧客情報を取得"""
+    try:
+        url = f"https://api.notion.com/v1/pages/{customer_id}"
+        headers = {
+            "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
+            "Notion-Version": "2022-06-28"
+        }
+        
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            
+            company_name = ""
+            if data["properties"].get("会社名", {}).get("title"):
+                company_name = data["properties"]["会社名"]["title"][0]["text"]["content"]
+            
+            return {"name": company_name}
+    except Exception as e:
+        st.error(f"顧客情報取得エラー: {str(e)}")
+    
+    return None
+
+def save_to_notion(data):
+    """Notionデータベースに保存（簡易版）"""
+    notion_api_key = st.secrets.get("NOTION_API_KEY")
+    database_id = st.secrets.get("NOTION_DATABASE_ID")
+    
+    if not notion_api_key or not database_id:
+        st.error("Notion設定が不完全です。NOTION_API_KEYとNOTION_DATABASE_IDを設定してください。")
+        return False
+    
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {notion_api_key}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    properties = {}
+    
+    # 必須フィールド - 顧客名をタイトルに設定
+    if data.get("顧客名"):
+        properties["顧客名"] = {
+            "title": [{"text": {"content": str(data["顧客名"])[:100]}}]
+        }
+    
+    # その他のフィールド
+    if data.get("案件名"):
+        properties["案件名"] = {
+            "rich_text": [{"text": {"content": str(data["案件名"])[:2000]}}]
+        }
+    
+    if data.get("依頼日"):
+        properties["依頼日"] = {
+            "date": {"start": str(data["依頼日"])}
+        }
+    
+    if data.get("依頼種別"):
+        properties["依頼種別"] = {
+            "select": {"name": str(data["依頼種別"])}
+        }
+    
+    if data.get("OS機種"):
+        properties["依頼機種"] = {
+            "select": {"name": str(data["OS機種"])}
+        }
+    
+    properties["ステータス"] = {
+        "select": {"name": "依頼中"}
+    }
+    
+    # 長いテキストフィールドは分割して保存
+    if data.get("見積依頼文"):
+        text = str(data["見積依頼文"])[:2000]
+        properties["見積依頼文"] = {
+            "rich_text": [{"text": {"content": text}}]
+        }
+    
+    if data.get("図面依頼文"):
+        text = str(data["図面依頼文"])[:2000]
+        properties["図面依頼文"] = {
+            "rich_text": [{"text": {"content": text}}]
+        }
+    
+    if data.get("仕様詳細"):
+        spec_text = format_specifications_for_notion(data["仕様詳細"])
+        properties["仕様詳細"] = {
+            "rich_text": [{"text": {"content": spec_text[:2000]}}]
+        }
+    
+    if data.get("備考"):
+        properties["備考"] = {
+            "rich_text": [{"text": {"content": str(data["備考"])[:2000]}}]
+        }
+    
+    payload = {
+        "parent": {"database_id": database_id},
+        "properties": properties
+    }
+    
+    try:
         response = requests.post(url, headers=headers, json=payload, timeout=30)
         
         if response.status_code == 200:
@@ -787,427 +1210,4 @@ def main():
         st.write("最後の操作:", st.session_state.last_operation)
 
 if __name__ == "__main__":
-    main()=headers, json={})
-        if response.status_code == 200:
-            data = response.json()
-            customers = []
-            for page in data.get("results", []):
-                company_name = ""
-                if page["properties"].get("会社名", {}).get("title"):
-                    company_name = page["properties"]["会社名"]["title"][0]["text"]["content"]
-                
-                customers.append({
-                    "id": page["id"],
-                    "name": company_name
-                })
-            return customers
-        else:
-            st.error(f"顧客情報の取得に失敗: {response.status_code}")
-            return []
-    except Exception as e:
-        st.error(f"顧客情報取得エラー: {str(e)}")
-        return []
-
-@st.cache_data(ttl=300)
-def fetch_projects(customer_id=None):
-    """案件管理データベースから案件一覧を取得"""
-    project_db_id = st.secrets.get("PROJECT_DB_ID")
-    if not project_db_id:
-        return []
-    
-    url = f"https://api.notion.com/v1/databases/{project_db_id}/query"
-    headers = {
-        "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-    
-    # 顧客でフィルター（正しいプロパティ名「顧客企業」を使用）
-    payload = {}
-    if customer_id:
-        payload = {
-            "filter": {
-                "property": "顧客企業",
-                "relation": {
-                    "contains": customer_id
-                }
-            }
-        }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            projects = []
-            for page in data.get("results", []):
-                project_name = ""
-                
-                # タイトルプロパティを自動検出
-                for prop_name, prop_data in page["properties"].items():
-                    if prop_data.get("type") == "title":
-                        if prop_data.get("title") and len(prop_data["title"]) > 0:
-                            project_name = prop_data["title"][0]["text"]["content"]
-                            break
-                
-                if project_name:
-                    projects.append({
-                        "id": page["id"],
-                        "name": project_name
-                    })
-            
-            return projects
-        else:
-            st.error(f"案件情報の取得に失敗: {response.status_code}")
-            st.error(f"レスポンス: {response.text}")
-            return []
-    except Exception as e:
-        st.error(f"案件情報取得エラー: {str(e)}")
-        return []
-
-def create_new_customer(company_name):
-    """新規顧客を顧客企業マスタに作成"""
-    customer_db_id = st.secrets.get("CUSTOMER_DB_ID")
-    if not customer_db_id:
-        return None, "顧客企業マスタDBが設定されていません"
-    
-    url = "https://api.notion.com/v1/pages"
-    headers = {
-        "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-    
-    payload = {
-        "parent": {"database_id": customer_db_id},
-        "properties": {
-            "会社名": {
-                "title": [{"text": {"content": company_name}}]
-            }
-        }
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            data = response.json()
-            return data["id"], None
-        else:
-            return None, f"顧客作成に失敗: {response.status_code} - {response.text}"
-    except Exception as e:
-        return None, f"顧客作成エラー: {str(e)}"
-
-def create_new_project(project_name, customer_id):
-    """新規案件を案件管理データベースに作成"""
-    project_db_id = st.secrets.get("PROJECT_DB_ID")
-    if not project_db_id:
-        return None, "案件管理DBが設定されていません"
-    
-    url = "https://api.notion.com/v1/pages"
-    headers = {
-        "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-    
-    payload = {
-        "parent": {"database_id": project_db_id},
-        "properties": {
-            "案件名": {
-                "title": [{"text": {"content": project_name}}]
-            },
-            "顧客企業": {
-                "relation": [{"id": customer_id}]
-            },
-            "開始日": {
-                "date": {"start": datetime.now().strftime("%Y-%m-%d")}
-            },
-            "ステータス": {
-                "select": {"name": "進行中"}
-            }
-        }
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            data = response.json()
-            return data["id"], None
-        else:
-            return None, f"案件作成に失敗: {response.status_code} - {response.text}"
-    except Exception as e:
-        return None, f"案件作成エラー: {str(e)}"
-
-def save_omnisorter_request(project_id, data):
-    """OmniSorter依頼をデータベースに保存"""
-    # まずマスタ連携用のDBを試す
-    request_db_id = st.secrets.get("OMNISORTER_REQUEST_DB_ID")
-    
-    # マスタ連携用が未設定の場合は簡易版DBを使用（メッセージ非表示）
-    if not request_db_id:
-        request_db_id = st.secrets.get("NOTION_DATABASE_ID")
-    
-    if not request_db_id:
-        st.error("保存先データベースIDが設定されていません。")
-        return False
-    
-    url = "https://api.notion.com/v1/pages"
-    headers = {
-        "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-    
-    # 簡易版DBの場合は案件名も保存
-    properties = {}
-    
-    # 案件プロパティ（リレーション対応DBの場合）
-    if st.secrets.get("OMNISORTER_REQUEST_DB_ID"):
-        properties["案件"] = {
-            "relation": [{"id": project_id}]
-        }
-    else:
-        # 簡易版DBの場合は案件名を直接保存
-        # プロジェクトIDから案件名を取得
-        try:
-            project_info = get_project_info(project_id)
-            if project_info:
-                properties["案件名"] = {
-                    "rich_text": [{"text": {"content": project_info["name"]}}]
-                }
-                properties["顧客名"] = {
-                    "title": [{"text": {"content": project_info["customer_name"]}}]
-                }
-        except:
-            properties["案件名"] = {
-                "rich_text": [{"text": {"content": "マスタ連携案件"}}]
-            }
-            properties["顧客名"] = {
-                "title": [{"text": {"content": "マスタ連携顧客"}}]
-            }
-    
-    # 仕様詳細を見やすい形式で整形
-    spec_text = format_specifications_for_notion(data["仕様詳細"])
-    
-    # 共通プロパティ
-    properties.update({
-        "依頼日": {
-            "date": {"start": datetime.now().strftime("%Y-%m-%d")}
-        },
-        "依頼種別": {
-            "select": {"name": data["依頼種別"]}
-        },
-        "依頼機種": {
-            "select": {"name": data.get("OS機種", "未選択")}
-        },
-        "ステータス": {
-            "select": {"name": "依頼中"}
-        },
-        "見積依頼文": {
-            "rich_text": [{"text": {"content": data["見積依頼文"][:2000]}}]
-        },
-        "図面依頼文": {
-            "rich_text": [{"text": {"content": data["図面依頼文"][:2000]}}]
-        },
-        "仕様詳細": {
-            "rich_text": [{"text": {"content": spec_text[:2000]}}]
-        },
-        "備考": {
-            "rich_text": [{"text": {"content": data.get("備考", "")[:2000]}}]
-        }
-    })
-    
-    payload = {
-        "parent": {"database_id": request_db_id},
-        "properties": properties
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            return True
-        else:
-            st.error(f"OmniSorter依頼保存に失敗: {response.status_code}")
-            st.error(f"レスポンス: {response.text}")
-            return False
-    except Exception as e:
-        st.error(f"OmniSorter依頼保存エラー: {str(e)}")
-        return False
-
-def format_specifications_for_notion(specs_dict):
-    """仕様詳細をNotion用に見やすく整形"""
-    if not specs_dict:
-        return "仕様情報なし"
-    
-    formatted_text = "【仕様詳細】\n\n"
-    
-    # カテゴリごとに整理
-    categories = {
-        "OS機種": [],
-        "本体構成": [],
-        "設置容器": [],
-        "仕分け商品": [],
-        "オプション": [],
-        "自動計算値": []
-    }
-    
-    for key, value in specs_dict.items():
-        if "-" in key:
-            category, item = key.split("-", 1)
-            if category in categories:
-                categories[category].append(f"  • {item}: {value}")
-        elif key in ["間口数", "面数"]:
-            categories["自動計算値"].append(f"  • {key}: {value}")
-    
-    # カテゴリごとに出力
-    for category, items in categories.items():
-        if items:
-            formatted_text += f"{category}:\n"
-            formatted_text += "\n".join(items)
-            formatted_text += "\n\n"
-    
-    return formatted_text
-
-def get_project_info(project_id):
-    """プロジェクトIDから案件情報を取得"""
-    try:
-        url = f"https://api.notion.com/v1/pages/{project_id}"
-        headers = {
-            "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
-            "Notion-Version": "2022-06-28"
-        }
-        
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            
-            # 案件名を取得
-            project_name = ""
-            for prop_name, prop_data in data["properties"].items():
-                if prop_data.get("type") == "title":
-                    if prop_data.get("title") and len(prop_data["title"]) > 0:
-                        project_name = prop_data["title"][0]["text"]["content"]
-                        break
-            
-            # 顧客名を取得（リレーションから）
-            customer_name = ""
-            customer_relation = data["properties"].get("顧客企業", {}).get("relation", [])
-            if customer_relation:
-                customer_id = customer_relation[0]["id"]
-                customer_info = get_customer_info(customer_id)
-                if customer_info:
-                    customer_name = customer_info["name"]
-            
-            return {
-                "name": project_name,
-                "customer_name": customer_name
-            }
-    except Exception as e:
-        st.error(f"案件情報取得エラー: {str(e)}")
-    
-    return None
-
-def get_customer_info(customer_id):
-    """顧客IDから顧客情報を取得"""
-    try:
-        url = f"https://api.notion.com/v1/pages/{customer_id}"
-        headers = {
-            "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
-            "Notion-Version": "2022-06-28"
-        }
-        
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            
-            company_name = ""
-            if data["properties"].get("会社名", {}).get("title"):
-                company_name = data["properties"]["会社名"]["title"][0]["text"]["content"]
-            
-            return {"name": company_name}
-    except Exception as e:
-        st.error(f"顧客情報取得エラー: {str(e)}")
-    
-    return None
-
-def save_to_notion(data):
-    """Notionデータベースに保存（簡易版）"""
-    notion_api_key = st.secrets.get("NOTION_API_KEY")
-    database_id = st.secrets.get("NOTION_DATABASE_ID")
-    
-    if not notion_api_key or not database_id:
-        st.error("Notion設定が不完全です。NOTION_API_KEYとNOTION_DATABASE_IDを設定してください。")
-        return False
-    
-    url = "https://api.notion.com/v1/pages"
-    headers = {
-        "Authorization": f"Bearer {notion_api_key}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-    
-    properties = {}
-    
-    # 必須フィールド - 顧客名をタイトルに設定
-    if data.get("顧客名"):
-        properties["顧客名"] = {
-            "title": [{"text": {"content": str(data["顧客名"])[:100]}}]
-        }
-    
-    # その他のフィールド
-    if data.get("案件名"):
-        properties["案件名"] = {
-            "rich_text": [{"text": {"content": str(data["案件名"])[:2000]}}]
-        }
-    
-    if data.get("依頼日"):
-        properties["依頼日"] = {
-            "date": {"start": str(data["依頼日"])}
-        }
-    
-    if data.get("依頼種別"):
-        properties["依頼種別"] = {
-            "select": {"name": str(data["依頼種別"])}
-        }
-    
-    if data.get("OS機種"):
-        properties["依頼機種"] = {  # プロパティ名を正しく修正
-            "select": {"name": str(data["OS機種"])}
-        }
-    
-    properties["ステータス"] = {
-        "select": {"name": "依頼中"}
-    }
-    
-    # 長いテキストフィールドは分割して保存
-    if data.get("見積依頼文"):
-        text = str(data["見積依頼文"])[:2000]
-        properties["見積依頼文"] = {
-            "rich_text": [{"text": {"content": text}}]
-        }
-    
-    if data.get("図面依頼文"):
-        text = str(data["図面依頼文"])[:2000]
-        properties["図面依頼文"] = {
-            "rich_text": [{"text": {"content": text}}]
-        }
-    
-    if data.get("仕様詳細"):
-        spec_text = format_specifications_for_notion(data["仕様詳細"])
-        properties["仕様詳細"] = {
-            "rich_text": [{"text": {"content": spec_text[:2000]}}]
-        }
-    
-    if data.get("備考"):
-        properties["備考"] = {
-            "rich_text": [{"text": {"content": str(data["備考"])[:2000]}}]
-        }
-    
-    payload = {
-        "parent": {"database_id": database_id},
-        "properties": properties
-    }
-    
-    try:
-        response = requests.post(url, headers
+    main()
