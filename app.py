@@ -131,8 +131,15 @@ def test_database_connection(db_name, db_id, api_key):
         
         if response.status_code == 200:
             data = response.json()
-            properties = list(data.get("properties", {}).keys())
-            return f"✅ {db_name}: 接続成功\nプロパティ: {properties}"
+            properties = data.get("properties", {})
+            
+            # プロパティの詳細情報を取得
+            prop_details = []
+            for prop_name, prop_data in properties.items():
+                prop_type = prop_data.get("type", "unknown")
+                prop_details.append(f"{prop_name} ({prop_type})")
+            
+            return f"✅ {db_name}: 接続成功\nプロパティ: {', '.join(prop_details)}"
         elif response.status_code == 401:
             return f"❌ {db_name}: APIキーが無効"
         elif response.status_code == 404:
@@ -278,29 +285,63 @@ def create_new_customer(company_name):
     if not customer_db_id:
         return None, "顧客企業マスタDBが設定されていません"
     
-    url = "https://api.notion.com/v1/pages"
+    # まずデータベースの構造を取得して、存在するプロパティを確認
+    db_url = f"https://api.notion.com/v1/databases/{customer_db_id}"
     headers = {
         "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
     
-    payload = {
-        "parent": {"database_id": customer_db_id},
-        "properties": {
-            "会社名": {
+    try:
+        # データベース構造を取得
+        db_response = requests.get(db_url, headers=headers)
+        if db_response.status_code != 200:
+            return None, f"データベース情報の取得に失敗: {db_response.status_code}"
+        
+        db_data = db_response.json()
+        available_properties = db_data.get("properties", {})
+        
+        # タイトルプロパティを自動検出
+        title_property = None
+        for prop_name, prop_data in available_properties.items():
+            if prop_data.get("type") == "title":
+                title_property = prop_name
+                break
+        
+        properties = {}
+        
+        if title_property:
+            properties[title_property] = {
                 "title": [{"text": {"content": company_name}}]
             }
+        else:
+            # デフォルトで "会社名" を試す
+            properties["会社名"] = {
+                "title": [{"text": {"content": company_name}}]
+            }
+        
+        # 顧客作成
+        url = "https://api.notion.com/v1/pages"
+        payload = {
+            "parent": {"database_id": customer_db_id},
+            "properties": properties
         }
-    }
-    
-    try:
+        
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 200:
             data = response.json()
             return data["id"], None
         else:
-            return None, f"顧客作成に失敗: {response.status_code} - {response.text}"
+            # デバッグ情報を含むエラーメッセージ
+            error_details = {
+                "status": response.status_code,
+                "response": response.text,
+                "available_properties": list(available_properties.keys()),
+                "used_properties": list(properties.keys())
+            }
+            return None, f"顧客作成に失敗: {json.dumps(error_details, ensure_ascii=False, indent=2)}"
+            
     except Exception as e:
         return None, f"顧客作成エラー: {str(e)}"
 
@@ -310,38 +351,92 @@ def create_new_project(project_name, customer_id):
     if not project_db_id:
         return None, "案件管理DBが設定されていません"
     
-    url = "https://api.notion.com/v1/pages"
+    # まずデータベースの構造を取得して、存在するプロパティを確認
+    db_url = f"https://api.notion.com/v1/databases/{project_db_id}"
     headers = {
         "Authorization": f"Bearer {st.secrets['NOTION_API_KEY']}",
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
     
-    payload = {
-        "parent": {"database_id": project_db_id},
-        "properties": {
-            "案件名": {
+    try:
+        # データベース構造を取得
+        db_response = requests.get(db_url, headers=headers)
+        if db_response.status_code != 200:
+            return None, f"データベース情報の取得に失敗: {db_response.status_code}"
+        
+        db_data = db_response.json()
+        available_properties = db_data.get("properties", {})
+        
+        # 基本プロパティ（必須）
+        properties = {}
+        
+        # タイトルプロパティを自動検出
+        title_property = None
+        for prop_name, prop_data in available_properties.items():
+            if prop_data.get("type") == "title":
+                title_property = prop_name
+                break
+        
+        if title_property:
+            properties[title_property] = {
                 "title": [{"text": {"content": project_name}}]
-            },
-            "顧客企業": {
+            }
+        else:
+            # デフォルトで "案件名" を試す
+            properties["案件名"] = {
+                "title": [{"text": {"content": project_name}}]
+            }
+        
+        # 顧客企業リレーション（存在する場合のみ）
+        if "顧客企業" in available_properties:
+            properties["顧客企業"] = {
                 "relation": [{"id": customer_id}]
-            },
+            }
+        
+        # オプショナルプロパティ（存在する場合のみ追加）
+        optional_properties = {
             "開始日": {
                 "date": {"start": datetime.now().strftime("%Y-%m-%d")}
             },
             "ステータス": {
                 "select": {"name": "進行中"}
+            },
+            "状態": {  # 別の可能性
+                "select": {"name": "進行中"}
+            },
+            "Status": {  # 英語の可能性
+                "select": {"name": "進行中"}
             }
         }
-    }
-    
-    try:
+        
+        # 存在するプロパティのみを追加
+        for prop_name, prop_value in optional_properties.items():
+            if prop_name in available_properties:
+                properties[prop_name] = prop_value
+                break  # ステータス系は1つだけ設定
+        
+        # 案件作成
+        url = "https://api.notion.com/v1/pages"
+        payload = {
+            "parent": {"database_id": project_db_id},
+            "properties": properties
+        }
+        
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 200:
             data = response.json()
             return data["id"], None
         else:
-            return None, f"案件作成に失敗: {response.status_code} - {response.text}"
+            # デバッグ情報を含むエラーメッセージ
+            error_details = {
+                "status": response.status_code,
+                "response": response.text,
+                "available_properties": list(available_properties.keys()),
+                "used_properties": list(properties.keys())
+            }
+            return None, f"案件作成に失敗: {json.dumps(error_details, ensure_ascii=False, indent=2)}"
+            
     except Exception as e:
         return None, f"案件作成エラー: {str(e)}"
 
