@@ -103,6 +103,20 @@ TRANSLATE_VALUE = {
     '有': 'Yes', '無': 'No'
 }
 
+# セッション状態の初期化
+def init_session_state():
+    """セッション状態を初期化"""
+    if 'form_data' not in st.session_state:
+        st.session_state.form_data = {}
+    if 'operation_in_progress' not in st.session_state:
+        st.session_state.operation_in_progress = False
+    if 'last_operation' not in st.session_state:
+        st.session_state.last_operation = None
+    if 'customers_cache_version' not in st.session_state:
+        st.session_state.customers_cache_version = 0
+    if 'projects_cache_version' not in st.session_state:
+        st.session_state.projects_cache_version = 0
+
 # API関数群
 def test_database_connection(db_name, db_id, api_key):
     """個別データベース接続テスト"""
@@ -179,7 +193,601 @@ def fetch_customers():
     }
     
     try:
-        response = requests.post(url, headers=headers, json={})
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            return True
+        else:
+            st.error(f"Notion API エラー: {response.status_code}")
+            st.error(f"レスポンス: {response.text}")
+            return False
+            
+    except requests.exceptions.Timeout:
+        st.error("リクエストがタイムアウトしました")
+        return False
+    except Exception as e:
+        st.error(f"保存エラー: {str(e)}")
+        return False
+
+# 計算関数
+def calculate_grid_count(rows, cols, blocks):
+    """間口数を計算（段×列×2×ブロック数）"""
+    if rows and cols and blocks:
+        try:
+            return int(rows) * int(cols) * 2 * int(blocks)
+        except (ValueError, TypeError):
+            return 0
+    return 0
+
+def calculate_surface_count(blocks):
+    """面数を計算（ブロック数×2）"""
+    if blocks:
+        try:
+            return int(blocks) * 2
+        except (ValueError, TypeError):
+            return 0
+    return 0
+
+def get_cart_options(surface_count):
+    """追加カート選択肢を生成"""
+    if surface_count <= 0:
+        return [""]
+    
+    options = [""]
+    for multiplier in [0.5, 1, 1.5, 2]:
+        value = int(surface_count * multiplier)
+        options.append(f"{value}台 ({multiplier}倍)")
+    options.append("自由入力")
+    return options
+
+def get_tote_options(grid_count):
+    """追加トート選択肢を生成"""
+    if grid_count <= 0:
+        return [""]
+    
+    options = [""]
+    for multiplier in [0.5, 1, 1.5, 2]:
+        value = int(grid_count * multiplier)
+        options.append(f"{value}個 ({multiplier}倍)")
+    options.append("自由入力")
+    return options
+
+def generate_quotation_text(form_data):
+    """見積依頼文生成"""
+    quotation_items = [item for item in FORM_ITEMS if "見積" in item["必要種別"]]
+    
+    content = "OmniSorter見積依頼\n\n【基本仕様】\n"
+    
+    # 自動計算値を追加
+    grid_count = form_data.get("間口数")
+    
+    # カテゴリごとにグループ化
+    groups = {}
+    for item in quotation_items:
+        key = f"{item['大項目']}-{item['小項目']}"
+        if key in form_data and form_data[key]:
+            category = item["大項目"]
+            if category not in groups:
+                groups[category] = []
+            
+            label = "" if item["小項目"] == "-" else item["小項目"]
+            value = form_data[key]
+            if "mm単位" in item["備考"]:
+                value = f"{value}[mm]"
+            
+            groups[category].append({"label": label, "value": value})
+    
+    # 自動計算値を本体構成に追加
+    if grid_count:
+        if "本体構成" not in groups:
+            groups["本体構成"] = []
+        groups["本体構成"].append({"label": "間口数", "value": f"{grid_count}口"})
+    
+    for category, items in groups.items():
+        content += f"{category}:\n"
+        for item in items:
+            if item["label"]:
+                content += f"  {item['label']}: {item['value']}\n"
+            else:
+                content += f"  {item['value']}\n"
+        content += "\n"
+    
+    content += "上記仕様にて見積をお願いいたします。\nよろしくお願いいたします。"
+    return content
+
+def generate_drawing_text(form_data):
+    """図面依頼文生成（英語）"""
+    drawing_items = [item for item in FORM_ITEMS if "図面" in item["必要種別"]]
+    
+    content = "OmniSorter Drawing Request\n\n【Specifications】\n"
+    
+    # 自動計算値を追加
+    grid_count = form_data.get("間口数")
+    
+    # カテゴリごとにグループ化（英語）
+    groups = {}
+    for item in drawing_items:
+        key = f"{item['大項目']}-{item['小項目']}"
+        if key in form_data and form_data[key]:
+            category = TRANSLATE_CATEGORY.get(item["大項目"], item["大項目"])
+            if category not in groups:
+                groups[category] = []
+            
+            label = "" if item["小項目"] == "-" else TRANSLATE_ITEM.get(item["小項目"], item["小項目"])
+            value = TRANSLATE_VALUE.get(form_data[key], form_data[key])
+            if "mm単位" in item["備考"]:
+                value = f"{value}[mm]"
+            
+            groups[category].append({"label": label, "value": value})
+    
+    # 自動計算値を追加
+    if grid_count:
+        if "Main Configuration" not in groups:
+            groups["Main Configuration"] = []
+        groups["Main Configuration"].append({"label": "Grid Count", "value": f"{grid_count} grids"})
+    
+    for category, items in groups.items():
+        content += f"{category}:\n"
+        for item in items:
+            if item["label"]:
+                content += f"  {item['label']}: {item['value']}\n"
+            else:
+                content += f"  {item['value']}\n"
+        content += "\n"
+    
+    content += "Please provide technical drawings based on the above specifications.\n"
+    content += "Thank you for your cooperation.\n\nBest regards,"
+    return content
+
+def should_show_field(item, form_data):
+    """条件付きフィールドの表示判定"""
+    if "スロープタイプの場合のみ" in item["備考"]:
+        return form_data.get("本体構成-間口タイプ") == "スロープ式"
+    elif "カート式の場合のみ" in item["備考"]:
+        return form_data.get("本体構成-間口タイプ") == "カート式"
+    elif "標準トートの場合のみ" in item["備考"]:
+        return form_data.get("設置容器-標準/個別") == "標準トート"
+    return True
+
+def reset_form():
+    """フォームをリセット"""
+    st.session_state.form_data = {}
+    st.session_state.operation_in_progress = False
+    st.session_state.last_operation = None
+
+def clear_cache():
+    """キャッシュをクリア"""
+    fetch_customers.clear()
+    fetch_projects.clear()
+    st.session_state.customers_cache_version += 1
+    st.session_state.projects_cache_version += 1
+
+def main():
+    # セッション状態を初期化
+    init_session_state()
+    
+    st.markdown('<h1 class="main-header">📦 OmniSorter 見積・図面依頼システム</h1>', unsafe_allow_html=True)
+    
+    # Notion接続テスト（サイドバーを初期状態で閉じる）
+    with st.sidebar.expander("🔧 システム診断", expanded=False):
+        st.header("🔧 システム状態")
+        if st.button("接続テスト"):
+            try:
+                success, message = test_notion_connection()
+                if success:
+                    st.success("接続テスト結果:")
+                    st.text(message)
+                else:
+                    st.error("接続テスト結果:")
+                    st.text(message)
+            except Exception as e:
+                st.error(f"テスト実行エラー: {str(e)}")
+        
+        # 設定確認
+        st.subheader("📋 設定確認")
+        
+        # データベースID確認
+        simple_db_id = st.secrets.get("NOTION_DATABASE_ID")
+        simple_status = "✅ 設定済み" if simple_db_id else "❌ 未設定"
+        st.text(f"OmniSorter依頼DB: {simple_status}")
+        
+        # マスタ連携用（オプション）
+        st.text("--- マスタ連携用（オプション） ---")
+        
+        customer_db_id = st.secrets.get("CUSTOMER_DB_ID")
+        customer_status = "✅ 設定済み" if customer_db_id else "⚠️ 未設定"
+        st.text(f"顧客企業マスタ: {customer_status}")
+        
+        project_db_id = st.secrets.get("PROJECT_DB_ID")
+        project_status = "✅ 設定済み" if project_db_id else "⚠️ 未設定"
+        st.text(f"案件管理DB: {project_status}")
+        
+        if simple_db_id:
+            st.success("✅ 簡易モードが利用可能です")
+        
+        master_ready = customer_db_id and project_db_id
+        if master_ready:
+            st.success("✅ マスタ連携モードが利用可能です")
+        else:
+            st.info("ℹ️ マスタ連携には2つのDBが必要です")
+    
+    # タブ設定
+    tab1, tab2, tab3 = st.tabs(["📝 入力フォーム", "💰 見積依頼文", "📐 図面依頼文"])
+    
+    with tab1:
+        # 操作進行中の場合は警告表示
+        if st.session_state.operation_in_progress:
+            st.warning("⚠️ 操作を実行中です。完了するまでお待ちください。")
+        
+        # マスタ連携の設定
+        use_master_sync = st.checkbox("既存マスタと連携する", value=False, 
+                                    help="顧客企業マスタと案件管理データベースと連携します",
+                                    disabled=st.session_state.operation_in_progress)
+        
+        if use_master_sync:
+            # マスタ連携モード
+            st.markdown('<div class="section-header"><h3>🏢 顧客・案件選択</h3></div>', unsafe_allow_html=True)
+            
+            # 顧客選択
+            customers = fetch_customers()
+            if not customers:
+                st.warning("顧客企業マスタからデータを取得できません。接続設定を確認してください。")
+                return
+                
+            customer_options = ["--- 新規顧客 ---"] + [f"{c['name']}" for c in customers]
+            
+            selected_customer_index = st.selectbox(
+                "顧客選択（会社名）",
+                range(len(customer_options)),
+                format_func=lambda x: customer_options[x],
+                disabled=st.session_state.operation_in_progress
+            )
+            
+            selected_customer = None
+            selected_customer_id = None
+            
+            if selected_customer_index == 0:
+                # 新規顧客
+                new_company_name = st.text_input("新規会社名", placeholder="株式会社○○", 
+                                               disabled=st.session_state.operation_in_progress)
+                if new_company_name and not st.session_state.operation_in_progress:
+                    if st.button("💾 新規顧客を作成", disabled=st.session_state.operation_in_progress):
+                        st.session_state.operation_in_progress = True
+                        with st.spinner("顧客を作成中..."):
+                            customer_id, error = create_new_customer(new_company_name)
+                            if customer_id:
+                                st.success(f"✅ 顧客「{new_company_name}」を作成しました")
+                                st.session_state.last_operation = f"customer_created_{customer_id}"
+                                clear_cache()
+                                # 作成した顧客を選択状態にする
+                                selected_customer_id = customer_id
+                                selected_customer = {"id": customer_id, "name": new_company_name}
+                            else:
+                                st.error(f"❌ 顧客作成に失敗: {error}")
+                        st.session_state.operation_in_progress = False
+            else:
+                selected_customer = customers[selected_customer_index - 1]
+                selected_customer_id = selected_customer['id']
+                st.info(f"選択された顧客: {selected_customer['name']}")
+            
+            # 案件選択
+            selected_project = None
+            selected_project_id = None
+            
+            if selected_customer_id:
+                projects = fetch_projects(selected_customer_id)
+                project_options = ["--- 新規案件 ---"] + [f"{p['name']}" for p in projects]
+                
+                selected_project_index = st.selectbox(
+                    "案件選択（案件名）",
+                    range(len(project_options)),
+                    format_func=lambda x: project_options[x],
+                    disabled=st.session_state.operation_in_progress
+                )
+                
+                if selected_project_index == 0:
+                    # 新規案件
+                    new_project_name = st.text_input("新規案件名", placeholder="○○倉庫OmniSorter導入",
+                                                   disabled=st.session_state.operation_in_progress)
+                    if new_project_name and not st.session_state.operation_in_progress:
+                        if st.button("💾 新規案件を作成", disabled=st.session_state.operation_in_progress):
+                            st.session_state.operation_in_progress = True
+                            with st.spinner("案件を作成中..."):
+                                project_id, error = create_new_project(new_project_name, selected_customer_id)
+                                if project_id:
+                                    st.success(f"✅ 案件「{new_project_name}」を作成しました")
+                                    st.session_state.last_operation = f"project_created_{project_id}"
+                                    clear_cache()
+                                    # 作成した案件を選択状態にする
+                                    selected_project_id = project_id
+                                    selected_project = {"id": project_id, "name": new_project_name}
+                                else:
+                                    st.error(f"❌ 案件作成に失敗: {error}")
+                            st.session_state.operation_in_progress = False
+                else:
+                    if selected_project_index - 1 < len(projects):
+                        selected_project = projects[selected_project_index - 1]
+                        selected_project_id = selected_project['id']
+                        st.info(f"選択された案件: {selected_project['name']}")
+            
+            # 依頼種別と備考
+            request_type = st.selectbox("依頼種別", ["見積/図面", "見積のみ", "図面のみ"],
+                                      disabled=st.session_state.operation_in_progress)
+            notes = st.text_area("備考", placeholder="特記事項があれば記入してください",
+                               disabled=st.session_state.operation_in_progress)
+            
+        else:
+            # 簡易モード
+            st.markdown('<div class="section-header"><h3>案件情報</h3></div>', unsafe_allow_html=True)
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                customer_name = st.text_input("顧客名 *", disabled=st.session_state.operation_in_progress)
+            
+            with col2:
+                project_name = st.text_input("案件名 *", disabled=st.session_state.operation_in_progress)
+            
+            with col3:
+                request_type = st.selectbox("依頼種別", ["見積/図面", "見積のみ", "図面のみ"],
+                                          disabled=st.session_state.operation_in_progress)
+            
+            notes = st.text_area("備考", placeholder="特記事項があれば記入してください",
+                               disabled=st.session_state.operation_in_progress)
+        
+        # 仕様入力
+        st.markdown('<div class="section-header"><h3>⚙️ 仕様入力</h3></div>', unsafe_allow_html=True)
+        
+        # カテゴリごとに表示（1列表示、枠囲み）
+        categories = {}
+        for item in FORM_ITEMS:
+            if item["大項目"] not in categories:
+                categories[item["大項目"]] = []
+            categories[item["大項目"]].append(item)
+        
+        # 各カテゴリをシンプルに表示
+        for category, items in categories.items():
+            # セクション見出しのアイコン
+            icons = {
+                "OS機種": "🤖",
+                "本体構成": "🏗️", 
+                "設置容器": "📦",
+                "仕分け商品": "📋",
+                "オプション": "⚙️"
+            }
+            
+            icon = icons.get(category, "📌")
+            
+            # シンプルなセクション表示
+            st.subheader(f"{icon} {category}")
+            
+            # セクション内の項目を2列で表示
+            item_cols = st.columns(2)
+            item_index = 0
+            
+            for item in items:
+                if not should_show_field(item, st.session_state.form_data):
+                    continue
+                
+                with item_cols[item_index % 2]:
+                    key = f"{item['大項目']}-{item['小項目']}"
+                    label = item["大項目"] if item["小項目"] == "-" else item["小項目"]
+                    
+                    if item["備考"]:
+                        label += f" ({item['備考']})"
+                    
+                    if item["取り得る値"] and item["取り得る値"] not in ["(任意)", "", "(選択)"]:
+                        # 通常の選択肢
+                        options = [""] + item["取り得る値"].split(",")
+                        current_value = st.session_state.form_data.get(key, "")
+                        selected = st.selectbox(label, options, 
+                                              index=options.index(current_value) if current_value in options else 0,
+                                              key=key, disabled=st.session_state.operation_in_progress)
+                        if selected:
+                            st.session_state.form_data[key] = selected
+                        elif key in st.session_state.form_data:
+                            del st.session_state.form_data[key]
+                    
+                    elif item["小項目"] == "追加カート":
+                        # 追加カート特別処理
+                        surface_count = calculate_surface_count(st.session_state.form_data.get("本体構成-ブロック"))
+                        options = get_cart_options(surface_count)
+                        
+                        current_value = st.session_state.form_data.get(key, "")
+                        selected = st.selectbox(label, options, 
+                                              index=options.index(current_value) if current_value in options else 0,
+                                              key=key, disabled=st.session_state.operation_in_progress)
+                        
+                        if selected == "自由入力":
+                            custom_value = st.number_input("カート数を入力", min_value=0, key=f"{key}_custom",
+                                                         disabled=st.session_state.operation_in_progress)
+                            if custom_value > 0:
+                                st.session_state.form_data[key] = f"{custom_value}台"
+                        elif selected:
+                            st.session_state.form_data[key] = selected
+                        elif key in st.session_state.form_data:
+                            del st.session_state.form_data[key]
+                    
+                    elif item["小項目"] == "追加トート":
+                        # 追加トート特別処理
+                        grid_count = calculate_grid_count(
+                            st.session_state.form_data.get("本体構成-段"),
+                            st.session_state.form_data.get("本体構成-列"),
+                            st.session_state.form_data.get("本体構成-ブロック")
+                        )
+                        options = get_tote_options(grid_count)
+                        
+                        current_value = st.session_state.form_data.get(key, "")
+                        selected = st.selectbox(label, options, 
+                                              index=options.index(current_value) if current_value in options else 0,
+                                              key=key, disabled=st.session_state.operation_in_progress)
+                        
+                        if selected == "自由入力":
+                            custom_value = st.number_input("トート数を入力", min_value=0, key=f"{key}_custom",
+                                                         disabled=st.session_state.operation_in_progress)
+                            if custom_value > 0:
+                                st.session_state.form_data[key] = f"{custom_value}個"
+                        elif selected:
+                            st.session_state.form_data[key] = selected
+                        elif key in st.session_state.form_data:
+                            del st.session_state.form_data[key]
+                    
+                    else:
+                        # 自由入力の場合
+                        input_type = "number" if any(unit in item["備考"] for unit in ["mm単位", "台単位", "個単位"]) else "text"
+                        current_value = st.session_state.form_data.get(key, "")
+                        
+                        if input_type == "number":
+                            # 空欄を許可する数値入力
+                            value = st.text_input(label, value=current_value, key=key, 
+                                                placeholder="数値を入力（空欄可）",
+                                                disabled=st.session_state.operation_in_progress)
+                            if value and value.isdigit():
+                                st.session_state.form_data[key] = value
+                            elif not value and key in st.session_state.form_data:
+                                del st.session_state.form_data[key]
+                        else:
+                            value = st.text_input(label, value=current_value, key=key,
+                                                disabled=st.session_state.operation_in_progress)
+                            if value:
+                                st.session_state.form_data[key] = value
+                            elif key in st.session_state.form_data:
+                                del st.session_state.form_data[key]
+                
+                item_index += 1
+            
+            # 自動計算値の表示（本体構成セクションのみ）
+            if category == "本体構成":
+                st.markdown("---")
+                
+                # 間口数計算
+                rows = st.session_state.form_data.get("本体構成-段")
+                cols_data = st.session_state.form_data.get("本体構成-列")
+                blocks = st.session_state.form_data.get("本体構成-ブロック")
+                
+                grid_count = calculate_grid_count(rows, cols_data, blocks)
+                surface_count = calculate_surface_count(blocks)
+                
+                calc_cols = st.columns(2)
+                
+                with calc_cols[0]:
+                    if grid_count > 0:
+                        st.info(f"🔢 **間口数**: {grid_count}口 (段×列×2×ブロック数)")
+                        st.session_state.form_data["間口数"] = grid_count
+                
+                with calc_cols[1]:
+                    if surface_count > 0:
+                        st.info(f"📐 **面数**: {surface_count}面 (ブロック数×2)")
+                        st.session_state.form_data["面数"] = surface_count
+            
+            # セクション間のスペース
+            st.write("")
+        
+        # 保存ボタン
+        st.markdown("---")
+        
+        # 保存ボタンのカラム
+        save_col, reset_col = st.columns([3, 1])
+        
+        with save_col:
+            if use_master_sync:
+                # マスタ連携版の保存
+                can_save = ('selected_project_id' in locals() and selected_project_id is not None)
+                
+                if st.button("💾 マスタ連携で保存", type="primary", 
+                           disabled=st.session_state.operation_in_progress or not can_save):
+                    if not can_save:
+                        st.error("案件を選択してください。")
+                    else:
+                        st.session_state.operation_in_progress = True
+                        with st.spinner("保存中..."):
+                            # 依頼文生成
+                            quotation_text = generate_quotation_text(st.session_state.form_data)
+                            drawing_text = generate_drawing_text(st.session_state.form_data)
+                            
+                            # 保存用データ
+                            save_data = {
+                                "依頼種別": request_type,
+                                "OS機種": st.session_state.form_data.get("OS機種-", "未選択"),
+                                "見積依頼文": quotation_text,
+                                "図面依頼文": drawing_text,
+                                "仕様詳細": st.session_state.form_data,
+                                "備考": notes
+                            }
+                            
+                            if save_omnisorter_request(selected_project_id, save_data):
+                                st.success("✅ マスタ連携でOmniSorter依頼が正常に保存されました！")
+                                st.session_state.last_operation = "request_saved"
+                            else:
+                                st.error("❌ 保存に失敗しました。")
+                        st.session_state.operation_in_progress = False
+            else:
+                # 簡易版の保存
+                can_save = ('customer_name' in locals() and 'project_name' in locals() and 
+                           customer_name and project_name)
+                
+                if st.button("💾 Notionに保存", type="primary", 
+                           disabled=st.session_state.operation_in_progress or not can_save):
+                    if not can_save:
+                        st.error("顧客名と案件名は必須です。")
+                    else:
+                        st.session_state.operation_in_progress = True
+                        with st.spinner("保存中..."):
+                            # 依頼文生成
+                            quotation_text = generate_quotation_text(st.session_state.form_data)
+                            drawing_text = generate_drawing_text(st.session_state.form_data)
+                            
+                            # Notion保存用データ
+                            notion_data = {
+                                "顧客名": customer_name,
+                                "案件名": project_name,
+                                "依頼日": datetime.now().strftime("%Y-%m-%d"),
+                                "依頼種別": request_type,
+                                "OS機種": st.session_state.form_data.get("OS機種-", "未選択"),
+                                "見積依頼文": quotation_text,
+                                "図面依頼文": drawing_text,
+                                "仕様詳細": st.session_state.form_data,
+                                "備考": notes
+                            }
+                            
+                            if save_to_notion(notion_data):
+                                st.markdown('<div class="success-message">✅ Notionに正常に保存されました！</div>', unsafe_allow_html=True)
+                                st.session_state.last_operation = "request_saved"
+                            else:
+                                st.markdown('<div class="error-message">❌ 保存に失敗しました。設定を確認してください。</div>', unsafe_allow_html=True)
+                        st.session_state.operation_in_progress = False
+        
+        with reset_col:
+            if st.button("🔄 フォームリセット", disabled=st.session_state.operation_in_progress):
+                reset_form()
+                st.success("フォームをリセットしました")
+                st.rerun()
+    
+    with tab2:
+        st.subheader("見積依頼文")
+        quotation_text = generate_quotation_text(st.session_state.form_data)
+        st.text_area("", value=quotation_text, height=400, key="quotation_display")
+        
+        if st.button("📋 クリップボードにコピー", key="copy_quotation"):
+            st.code(quotation_text)
+            st.success("上記テキストをコピーしてご利用ください。")
+    
+    with tab3:
+        st.subheader("図面依頼文（英語）")
+        drawing_text = generate_drawing_text(st.session_state.form_data)
+        st.text_area("", value=drawing_text, height=400, key="drawing_display")
+        
+        if st.button("📋 クリップボードにコピー", key="copy_drawing"):
+            st.code(drawing_text)
+            st.success("上記テキストをコピーしてご利用ください。")
+
+    # デバッグ情報（開発用）
+    with st.expander("🔍 デバッグ情報（開発用）", expanded=False):
+        st.write("フォームデータ:", st.session_state.form_data)
+        st.write("操作進行中:", st.session_state.operation_in_progress)
+        st.write("最後の操作:", st.session_state.last_operation)
+
+if __name__ == "__main__":
+    main()=headers, json={})
         if response.status_code == 200:
             data = response.json()
             customers = []
@@ -262,7 +870,7 @@ def create_new_customer(company_name):
     """新規顧客を顧客企業マスタに作成"""
     customer_db_id = st.secrets.get("CUSTOMER_DB_ID")
     if not customer_db_id:
-        return None
+        return None, "顧客企業マスタDBが設定されていません"
     
     url = "https://api.notion.com/v1/pages"
     headers = {
@@ -284,19 +892,17 @@ def create_new_customer(company_name):
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 200:
             data = response.json()
-            return data["id"]
+            return data["id"], None
         else:
-            st.error(f"顧客作成に失敗: {response.status_code}")
-            return None
+            return None, f"顧客作成に失敗: {response.status_code} - {response.text}"
     except Exception as e:
-        st.error(f"顧客作成エラー: {str(e)}")
-        return None
+        return None, f"顧客作成エラー: {str(e)}"
 
 def create_new_project(project_name, customer_id):
     """新規案件を案件管理データベースに作成"""
     project_db_id = st.secrets.get("PROJECT_DB_ID")
     if not project_db_id:
-        return None
+        return None, "案件管理DBが設定されていません"
     
     url = "https://api.notion.com/v1/pages"
     headers = {
@@ -327,14 +933,11 @@ def create_new_project(project_name, customer_id):
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 200:
             data = response.json()
-            return data["id"]
+            return data["id"], None
         else:
-            st.error(f"案件作成に失敗: {response.status_code}")
-            st.error(f"レスポンス: {response.text}")
-            return None
+            return None, f"案件作成に失敗: {response.status_code} - {response.text}"
     except Exception as e:
-        st.error(f"案件作成エラー: {str(e)}")
-        return None
+        return None, f"案件作成エラー: {str(e)}"
 
 def save_omnisorter_request(project_id, data):
     """OmniSorter依頼をデータベースに保存"""
@@ -607,532 +1210,4 @@ def save_to_notion(data):
     }
     
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        
-        if response.status_code == 200:
-            return True
-        else:
-            st.error(f"Notion API エラー: {response.status_code}")
-            st.error(f"レスポンス: {response.text}")
-            return False
-            
-    except requests.exceptions.Timeout:
-        st.error("リクエストがタイムアウトしました")
-        return False
-    except Exception as e:
-        st.error(f"保存エラー: {str(e)}")
-        return False
-
-# 計算関数
-def calculate_grid_count(rows, cols, blocks):
-    """間口数を計算（段×列×2×ブロック数）"""
-    if rows and cols and blocks:
-        try:
-            return int(rows) * int(cols) * 2 * int(blocks)
-        except (ValueError, TypeError):
-            return 0
-    return 0
-
-def calculate_surface_count(blocks):
-    """面数を計算（ブロック数×2）"""
-    if blocks:
-        try:
-            return int(blocks) * 2
-        except (ValueError, TypeError):
-            return 0
-    return 0
-
-def get_cart_options(surface_count):
-    """追加カート選択肢を生成"""
-    if surface_count <= 0:
-        return [""]
-    
-    options = [""]
-    for multiplier in [0.5, 1, 1.5, 2]:
-        value = int(surface_count * multiplier)
-        options.append(f"{value}台 ({multiplier}倍)")
-    options.append("自由入力")
-    return options
-
-def get_tote_options(grid_count):
-    """追加トート選択肢を生成"""
-    if grid_count <= 0:
-        return [""]
-    
-    options = [""]
-    for multiplier in [0.5, 1, 1.5, 2]:
-        value = int(grid_count * multiplier)
-        options.append(f"{value}個 ({multiplier}倍)")
-    options.append("自由入力")
-    return options
-
-def generate_quotation_text(form_data):
-    """見積依頼文生成"""
-    quotation_items = [item for item in FORM_ITEMS if "見積" in item["必要種別"]]
-    
-    content = "OmniSorter見積依頼\n\n【基本仕様】\n"
-    
-    # 自動計算値を追加
-    grid_count = form_data.get("間口数")
-    
-    # カテゴリごとにグループ化
-    groups = {}
-    for item in quotation_items:
-        key = f"{item['大項目']}-{item['小項目']}"
-        if key in form_data and form_data[key]:
-            category = item["大項目"]
-            if category not in groups:
-                groups[category] = []
-            
-            label = "" if item["小項目"] == "-" else item["小項目"]
-            value = form_data[key]
-            if "mm単位" in item["備考"]:
-                value = f"{value}[mm]"
-            
-            groups[category].append({"label": label, "value": value})
-    
-    # 自動計算値を本体構成に追加
-    if grid_count:
-        if "本体構成" not in groups:
-            groups["本体構成"] = []
-        groups["本体構成"].append({"label": "間口数", "value": f"{grid_count}口"})
-    
-    for category, items in groups.items():
-        content += f"{category}:\n"
-        for item in items:
-            if item["label"]:
-                content += f"  {item['label']}: {item['value']}\n"
-            else:
-                content += f"  {item['value']}\n"
-        content += "\n"
-    
-    content += "上記仕様にて見積をお願いいたします。\nよろしくお願いいたします。"
-    return content
-
-def generate_drawing_text(form_data):
-    """図面依頼文生成（英語）"""
-    drawing_items = [item for item in FORM_ITEMS if "図面" in item["必要種別"]]
-    
-    content = "OmniSorter Drawing Request\n\n【Specifications】\n"
-    
-    # 自動計算値を追加
-    grid_count = form_data.get("間口数")
-    
-    # カテゴリごとにグループ化（英語）
-    groups = {}
-    for item in drawing_items:
-        key = f"{item['大項目']}-{item['小項目']}"
-        if key in form_data and form_data[key]:
-            category = TRANSLATE_CATEGORY.get(item["大項目"], item["大項目"])
-            if category not in groups:
-                groups[category] = []
-            
-            label = "" if item["小項目"] == "-" else TRANSLATE_ITEM.get(item["小項目"], item["小項目"])
-            value = TRANSLATE_VALUE.get(form_data[key], form_data[key])
-            if "mm単位" in item["備考"]:
-                value = f"{value}[mm]"
-            
-            groups[category].append({"label": label, "value": value})
-    
-    # 自動計算値を追加
-    if grid_count:
-        if "Main Configuration" not in groups:
-            groups["Main Configuration"] = []
-        groups["Main Configuration"].append({"label": "Grid Count", "value": f"{grid_count} grids"})
-    
-    for category, items in groups.items():
-        content += f"{category}:\n"
-        for item in items:
-            if item["label"]:
-                content += f"  {item['label']}: {item['value']}\n"
-            else:
-                content += f"  {item['value']}\n"
-        content += "\n"
-    
-    content += "Please provide technical drawings based on the above specifications.\n"
-    content += "Thank you for your cooperation.\n\nBest regards,"
-    return content
-
-def should_show_field(item, form_data):
-    """条件付きフィールドの表示判定"""
-    if "スロープタイプの場合のみ" in item["備考"]:
-        return form_data.get("本体構成-間口タイプ") == "スロープ式"
-    elif "カート式の場合のみ" in item["備考"]:
-        return form_data.get("本体構成-間口タイプ") == "カート式"
-    elif "標準トートの場合のみ" in item["備考"]:
-        return form_data.get("設置容器-標準/個別") == "標準トート"
-    return True
-
-def main():
-    st.markdown('<h1 class="main-header">📦 OmniSorter 見積・図面依頼システム</h1>', unsafe_allow_html=True)
-    
-    # Notion接続テスト（サイドバーを初期状態で閉じる）
-    with st.sidebar.expander("🔧 システム診断", expanded=False):
-        st.header("🔧 システム状態")
-        if st.button("接続テスト"):
-            try:
-                success, message = test_notion_connection()
-                if success:
-                    st.success("接続テスト結果:")
-                    st.text(message)
-                else:
-                    st.error("接続テスト結果:")
-                    st.text(message)
-            except Exception as e:
-                st.error(f"テスト実行エラー: {str(e)}")
-        
-        # 設定確認
-        st.subheader("📋 設定確認")
-        # APIキー表示を削除
-        
-        # データベースID確認
-        simple_db_id = st.secrets.get("NOTION_DATABASE_ID")
-        simple_status = "✅ 設定済み" if simple_db_id else "❌ 未設定"
-        st.text(f"OmniSorter依頼DB: {simple_status}")
-        
-        # マスタ連携用（オプション）
-        st.text("--- マスタ連携用（オプション） ---")
-        
-        customer_db_id = st.secrets.get("CUSTOMER_DB_ID")
-        customer_status = "✅ 設定済み" if customer_db_id else "⚠️ 未設定"
-        st.text(f"顧客企業マスタ: {customer_status}")
-        
-        project_db_id = st.secrets.get("PROJECT_DB_ID")
-        project_status = "✅ 設定済み" if project_db_id else "⚠️ 未設定"
-        st.text(f"案件管理DB: {project_status}")
-        
-        if simple_db_id:
-            st.success("✅ 簡易モードが利用可能です")
-        
-        master_ready = customer_db_id and project_db_id
-        if master_ready:
-            st.success("✅ マスタ連携モードが利用可能です")
-        else:
-            st.info("ℹ️ マスタ連携には2つのDBが必要です")
-    
-    # セッション状態の初期化
-    if 'form_data' not in st.session_state:
-        st.session_state.form_data = {}
-    
-    # タブ設定
-    tab1, tab2, tab3 = st.tabs(["📝 入力フォーム", "💰 見積依頼文", "📐 図面依頼文"])
-    
-    with tab1:
-        # マスタ連携の設定
-        use_master_sync = st.checkbox("既存マスタと連携する", value=False, 
-                                    help="顧客企業マスタと案件管理データベースと連携します")
-        
-        if use_master_sync:
-            # マスタ連携モード
-            st.markdown('<div class="section-header"><h3>🏢 顧客・案件選択</h3></div>', unsafe_allow_html=True)
-            
-            # 顧客選択
-            customers = fetch_customers()
-            if not customers:
-                st.warning("顧客企業マスタからデータを取得できません。接続設定を確認してください。")
-                return
-                
-            customer_options = ["--- 新規顧客 ---"] + [f"{c['name']}" for c in customers]
-            
-            selected_customer_index = st.selectbox(
-                "顧客選択（会社名）",
-                range(len(customer_options)),
-                format_func=lambda x: customer_options[x]
-            )
-            
-            selected_customer = None
-            if selected_customer_index == 0:
-                # 新規顧客
-                new_company_name = st.text_input("新規会社名", placeholder="株式会社○○")
-                if new_company_name:
-                    if st.button("💾 新規顧客を作成"):
-                        customer_id = create_new_customer(new_company_name)
-                        if customer_id:
-                            st.success(f"顧客「{new_company_name}」を作成しました")
-                            st.cache_data.clear()
-                            st.rerun()
-            else:
-                selected_customer = customers[selected_customer_index - 1]
-                st.info(f"選択された顧客: {selected_customer['name']}")
-            
-            # 案件選択
-            selected_project = None
-            if selected_customer:
-                projects = fetch_projects(selected_customer['id'])
-                project_options = ["--- 新規案件 ---"] + [f"{p['name']}" for p in projects]
-                
-                selected_project_index = st.selectbox(
-                    "案件選択（案件名）",
-                    range(len(project_options)),
-                    format_func=lambda x: project_options[x]
-                )
-                
-                if selected_project_index == 0:
-                    # 新規案件
-                    new_project_name = st.text_input("新規案件名", placeholder="○○倉庫OmniSorter導入")
-                    if new_project_name:
-                        if st.button("💾 新規案件を作成"):
-                            project_id = create_new_project(new_project_name, selected_customer['id'])
-                            if project_id:
-                                st.success(f"案件「{new_project_name}」を作成しました")
-                                st.cache_data.clear()
-                                st.rerun()
-                else:
-                    selected_project = projects[selected_project_index - 1]
-                    st.info(f"選択された案件: {selected_project['name']}")
-            
-            # 依頼種別と備考
-            request_type = st.selectbox("依頼種別", ["見積/図面", "見積のみ", "図面のみ"])
-            notes = st.text_area("備考", placeholder="特記事項があれば記入してください")
-            
-        else:
-            # 簡易モード
-            st.markdown('<div class="section-header"><h3>案件情報</h3></div>', unsafe_allow_html=True)
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                customer_name = st.text_input("顧客名 *")
-            
-            with col2:
-                project_name = st.text_input("案件名 *")
-            
-            with col3:
-                request_type = st.selectbox("依頼種別", ["見積/図面", "見積のみ", "図面のみ"])
-            
-            notes = st.text_area("備考", placeholder="特記事項があれば記入してください")
-        
-        # 仕様入力
-        st.markdown('<div class="section-header"><h3>⚙️ 仕様入力</h3></div>', unsafe_allow_html=True)
-        
-        # カテゴリごとに表示（1列表示、枠囲み）
-        categories = {}
-        for item in FORM_ITEMS:
-            if item["大項目"] not in categories:
-                categories[item["大項目"]] = []
-            categories[item["大項目"]].append(item)
-        
-        # 各カテゴリをシンプルに表示
-        for category, items in categories.items():
-            # セクション見出しのアイコン
-            icons = {
-                "OS機種": "🤖",
-                "本体構成": "🏗️", 
-                "設置容器": "📦",
-                "仕分け商品": "📋",
-                "オプション": "⚙️"
-            }
-            
-            icon = icons.get(category, "📌")
-            
-            # シンプルなセクション表示
-            st.subheader(f"{icon} {category}")
-            
-            # セクション内の項目を2列で表示
-            item_cols = st.columns(2)
-            item_index = 0
-            
-            for item in items:
-                if not should_show_field(item, st.session_state.form_data):
-                    continue
-                
-                with item_cols[item_index % 2]:
-                    key = f"{item['大項目']}-{item['小項目']}"
-                    label = item["大項目"] if item["小項目"] == "-" else item["小項目"]
-                    
-                    if item["備考"]:
-                        label += f" ({item['備考']})"
-                    
-                    if item["取り得る値"] and item["取り得る値"] not in ["(任意)", "", "(選択)"]:
-                        # 通常の選択肢
-                        options = [""] + item["取り得る値"].split(",")
-                        current_value = st.session_state.form_data.get(key, "")
-                        selected = st.selectbox(label, options, 
-                                              index=options.index(current_value) if current_value in options else 0,
-                                              key=key)
-                        if selected:
-                            st.session_state.form_data[key] = selected
-                        elif key in st.session_state.form_data:
-                            del st.session_state.form_data[key]
-                    
-                    elif item["小項目"] == "追加カート":
-                        # 追加カート特別処理
-                        surface_count = calculate_surface_count(st.session_state.form_data.get("本体構成-ブロック"))
-                        options = get_cart_options(surface_count)
-                        
-                        current_value = st.session_state.form_data.get(key, "")
-                        selected = st.selectbox(label, options, 
-                                              index=options.index(current_value) if current_value in options else 0,
-                                              key=key)
-                        
-                        if selected == "自由入力":
-                            custom_value = st.number_input("カート数を入力", min_value=0, key=f"{key}_custom")
-                            if custom_value > 0:
-                                st.session_state.form_data[key] = f"{custom_value}台"
-                        elif selected:
-                            st.session_state.form_data[key] = selected
-                        elif key in st.session_state.form_data:
-                            del st.session_state.form_data[key]
-                    
-                    elif item["小項目"] == "追加トート":
-                        # 追加トート特別処理
-                        grid_count = calculate_grid_count(
-                            st.session_state.form_data.get("本体構成-段"),
-                            st.session_state.form_data.get("本体構成-列"),
-                            st.session_state.form_data.get("本体構成-ブロック")
-                        )
-                        options = get_tote_options(grid_count)
-                        
-                        current_value = st.session_state.form_data.get(key, "")
-                        selected = st.selectbox(label, options, 
-                                              index=options.index(current_value) if current_value in options else 0,
-                                              key=key)
-                        
-                        if selected == "自由入力":
-                            custom_value = st.number_input("トート数を入力", min_value=0, key=f"{key}_custom")
-                            if custom_value > 0:
-                                st.session_state.form_data[key] = f"{custom_value}個"
-                        elif selected:
-                            st.session_state.form_data[key] = selected
-                        elif key in st.session_state.form_data:
-                            del st.session_state.form_data[key]
-                    
-                    else:
-                        # 自由入力の場合
-                        input_type = "number" if any(unit in item["備考"] for unit in ["mm単位", "台単位", "個単位"]) else "text"
-                        current_value = st.session_state.form_data.get(key, "")
-                        
-                        if input_type == "number":
-                            # 空欄を許可する数値入力
-                            value = st.text_input(label, value=current_value, key=key, 
-                                                placeholder="数値を入力（空欄可）")
-                            if value and value.isdigit():
-                                st.session_state.form_data[key] = value
-                            elif not value and key in st.session_state.form_data:
-                                del st.session_state.form_data[key]
-                        else:
-                            value = st.text_input(label, value=current_value, key=key)
-                            if value:
-                                st.session_state.form_data[key] = value
-                            elif key in st.session_state.form_data:
-                                del st.session_state.form_data[key]
-                
-                item_index += 1
-            
-            # 自動計算値の表示（本体構成セクションのみ）
-            if category == "本体構成":
-                st.markdown("---")
-                
-                # 間口数計算
-                rows = st.session_state.form_data.get("本体構成-段")
-                cols_data = st.session_state.form_data.get("本体構成-列")
-                blocks = st.session_state.form_data.get("本体構成-ブロック")
-                
-                grid_count = calculate_grid_count(rows, cols_data, blocks)
-                surface_count = calculate_surface_count(blocks)
-                
-                calc_cols = st.columns(2)
-                
-                with calc_cols[0]:
-                    if grid_count > 0:
-                        st.info(f"🔢 **間口数**: {grid_count}口 (段×列×2×ブロック数)")
-                        st.session_state.form_data["間口数"] = grid_count
-                
-                with calc_cols[1]:
-                    if surface_count > 0:
-                        st.info(f"📐 **面数**: {surface_count}面 (ブロック数×2)")
-                        st.session_state.form_data["面数"] = surface_count
-            
-            # セクション間のスペース
-            st.write("")
-        
-        # 保存ボタン
-        st.markdown("---")
-        
-        if use_master_sync:
-            # マスタ連携版の保存
-            if st.button("💾 マスタ連携で保存", type="primary"):
-                if 'selected_project' not in locals() or not selected_project:
-                    st.error("案件を選択してください。")
-                else:
-                    # 重複実行防止のため一時的にボタンを無効化
-                    with st.spinner("保存中..."):
-                        # 依頼文生成
-                        quotation_text = generate_quotation_text(st.session_state.form_data)
-                        drawing_text = generate_drawing_text(st.session_state.form_data)
-                        
-                        # 保存用データ
-                        save_data = {
-                            "依頼種別": request_type,
-                            "OS機種": st.session_state.form_data.get("OS機種-", "未選択"),
-                            "見積依頼文": quotation_text,
-                            "図面依頼文": drawing_text,
-                            "仕様詳細": st.session_state.form_data,
-                            "備考": notes
-                        }
-                        
-                        if save_omnisorter_request(selected_project['id'], save_data):
-                            st.success("✅ マスタ連携でOmniSorter依頼が正常に保存されました！")
-                            # フォームリセットは手動で行う
-                            if st.button("🔄 フォームをリセット"):
-                                st.session_state.form_data = {}
-                                st.rerun()
-                        else:
-                            st.error("❌ 保存に失敗しました。")
-        else:
-            # 簡易版の保存
-            if st.button("💾 Notionに保存", type="primary"):
-                if 'customer_name' not in locals() or 'project_name' not in locals() or not customer_name or not project_name:
-                    st.error("顧客名と案件名は必須です。")
-                else:
-                    # 重複実行防止のため一時的にボタンを無効化
-                    with st.spinner("保存中..."):
-                        # 依頼文生成
-                        quotation_text = generate_quotation_text(st.session_state.form_data)
-                        drawing_text = generate_drawing_text(st.session_state.form_data)
-                        
-                        # Notion保存用データ
-                        notion_data = {
-                            "顧客名": customer_name,
-                            "案件名": project_name,
-                            "依頼日": datetime.now().strftime("%Y-%m-%d"),
-                            "依頼種別": request_type,
-                            "OS機種": st.session_state.form_data.get("OS機種-", "未選択"),
-                            "見積依頼文": quotation_text,
-                            "図面依頼文": drawing_text,
-                            "仕様詳細": st.session_state.form_data,
-                            "備考": notes
-                        }
-                        
-                        if save_to_notion(notion_data):
-                            st.markdown('<div class="success-message">✅ Notionに正常に保存されました！</div>', unsafe_allow_html=True)
-                            # フォームリセットは手動で行う
-                            if st.button("🔄 フォームをリセット"):
-                                st.session_state.form_data = {}
-                                st.rerun()
-                        else:
-                            st.markdown('<div class="error-message">❌ 保存に失敗しました。設定を確認してください。</div>', unsafe_allow_html=True)
-    
-    with tab2:
-        st.subheader("見積依頼文")
-        quotation_text = generate_quotation_text(st.session_state.form_data)
-        st.text_area("", value=quotation_text, height=400, key="quotation_display")
-        
-        if st.button("📋 クリップボードにコピー", key="copy_quotation"):
-            st.code(quotation_text)
-            st.success("上記テキストをコピーしてご利用ください。")
-    
-    with tab3:
-        st.subheader("図面依頼文（英語）")
-        drawing_text = generate_drawing_text(st.session_state.form_data)
-        st.text_area("", value=drawing_text, height=400, key="drawing_display")
-        
-        if st.button("📋 クリップボードにコピー", key="copy_drawing"):
-            st.code(drawing_text)
-            st.success("上記テキストをコピーしてご利用ください。")
-
-    # デバッグ情報（開発用）
-    with st.expander("🔍 デバッグ情報（開発用）", expanded=False):
-        st.write("フォームデータ:", st.session_state.form_data)
-
-if __name__ == "__main__":
-    main()
+        response = requests.post(url, headers
