@@ -240,7 +240,7 @@ def fetch_projects(customer_id=None):
     if customer_id:
         payload = {
             "filter": {
-                "property": "顧客企業",
+                "property": "会社名_拠点名",
                 "relation": {
                     "contains": customer_id
                 }
@@ -316,8 +316,8 @@ def create_new_customer(company_name):
                 "title": [{"text": {"content": company_name}}]
             }
         else:
-            # デフォルトで "会社名" を試す
-            properties["会社名"] = {
+            # デフォルトで "企業" を試す
+            properties["企業"] = {
                 "title": [{"text": {"content": company_name}}]
             }
         
@@ -389,8 +389,8 @@ def create_new_project(project_name, customer_id):
             }
         
         # 顧客企業リレーション（存在する場合のみ）
-        if "顧客企業" in available_properties:
-            properties["顧客企業"] = {
+        if "企業" in available_properties:
+            properties["企業"] = {
                 "relation": [{"id": customer_id}]
             }
         
